@@ -1,0 +1,33 @@
+# Gradle
+.gradle/
+build/
+*/build/
+local.properties
+
+# Android/IDE
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing files
+*.jks
+*.keystore
+keystore.properties
+
+# Logs and temp
+*.log
+*.tmp
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp / dev artifacts
+_tmp_epubsrc/
+.part1/
+reference-engreader/
+.vscode/
+*.py
