@@ -1,10 +1,9 @@
 package com.engreader.app.storage
 
-import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.provider.MediaStore
 import com.engreader.app.model.PersistedState
+import java.io.File
 import java.io.IOException
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -21,6 +20,13 @@ class BackupZipService(
 ) {
   private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
+  private val booksDir: File
+    get() {
+      val dir = File(context.filesDir, "books")
+      if (!dir.exists()) dir.mkdirs()
+      return dir
+    }
+
   suspend fun exportToZip(outputUri: Uri): Int =
     withContext(dispatcher) {
       val snapshot = stateStore.snapshot()
@@ -34,10 +40,10 @@ class BackupZipService(
 
           var count = 0
           snapshot.books.forEach { book ->
-            val source = Uri.parse(book.sourceUri)
-            resolver.openInputStream(source)?.use { input ->
+            val sourceFile = File(Uri.parse(book.sourceUri).path ?: return@forEach)
+            if (sourceFile.exists()) {
               zip.putNextEntry(ZipEntry("books/${book.id}.epub"))
-              input.copyTo(zip)
+              sourceFile.inputStream().use { it.copyTo(zip) }
               zip.closeEntry()
               count += 1
             }
@@ -50,7 +56,8 @@ class BackupZipService(
   suspend fun restoreFromZip(inputUri: Uri): RestoreResult =
     withContext(dispatcher) {
       val resolver = context.contentResolver
-      val payloadsByBookId = linkedMapOf<String, ByteArray>()
+      // 1.3 fix: Store temp file paths instead of ByteArrays to avoid OOM
+      val tempFilesByBookId = linkedMapOf<String, File>()
       var restoredState: PersistedState? = null
 
       resolver.openInputStream(inputUri).use { input ->
@@ -62,10 +69,11 @@ class BackupZipService(
               entry.name == "state.json" -> {
                 restoredState = json.decodeFromString(PersistedState.serializer(), zip.readBytes().decodeToString())
               }
-
               entry.name.startsWith("books/") && entry.name.endsWith(".epub") -> {
                 val id = entry.name.removePrefix("books/").removeSuffix(".epub")
-                payloadsByBookId[id] = zip.readBytes()
+                val tempFile = File(context.cacheDir, "restore_$id.epub")
+                tempFile.outputStream().use { zip.copyTo(it) }
+                tempFilesByBookId[id] = tempFile
               }
             }
             zip.closeEntry()
@@ -76,38 +84,24 @@ class BackupZipService(
 
       val snapshot = restoredState ?: throw IOException("Invalid backup: missing state.json")
 
-      stateStore.snapshot().books.forEach { existingBook ->
-        runCatching { resolver.delete(Uri.parse(existingBook.sourceUri), null, null) }
+      // 1.4 fix: Write new books first, then clean up old ones (transactional safety)
+      val rebuiltBooks = snapshot.books.mapNotNull { oldBook ->
+        val tempFile = tempFilesByBookId[oldBook.id] ?: return@mapNotNull null
+        val destFile = File(booksDir, "${oldBook.id}.epub")
+        tempFile.copyTo(destFile, overwrite = true)
+        tempFile.delete()
+        oldBook.copy(sourceUri = Uri.fromFile(destFile).toString())
       }
 
-      val rebuiltBooks =
-        snapshot.books.mapNotNull { oldBook ->
-          val bytes = payloadsByBookId[oldBook.id] ?: return@mapNotNull null
-          val newUri = writeBookToPublicStorage(oldBook.title, bytes)
-          oldBook.copy(sourceUri = newUri.toString())
-        }
+      // Now safe to delete old books
+      stateStore.snapshot().books.forEach { existingBook ->
+        val oldFile = runCatching { File(Uri.parse(existingBook.sourceUri).path!!) }.getOrNull()
+        oldFile?.delete()
+      }
 
       stateStore.replaceAll(snapshot.copy(books = rebuiltBooks))
       RestoreResult(restoredBooks = rebuiltBooks.size)
     }
-
-  private fun writeBookToPublicStorage(title: String, bytes: ByteArray): Uri {
-    val values =
-      ContentValues().apply {
-        put(MediaStore.MediaColumns.DISPLAY_NAME, "$title.epub")
-        put(MediaStore.MediaColumns.MIME_TYPE, "application/epub+zip")
-        put(MediaStore.MediaColumns.RELATIVE_PATH, "Documents/EngReader/books")
-      }
-
-    val resolver = context.contentResolver
-    val uri = resolver.insert(MediaStore.Files.getContentUri("external"), values) ?: error("Cannot create restored book")
-    resolver.openOutputStream(uri, "w").use { output ->
-      checkNotNull(output) { "Cannot open restored book output" }
-      output.write(bytes)
-      output.flush()
-    }
-    return uri
-  }
 }
 
 data class RestoreResult(

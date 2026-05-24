@@ -639,26 +639,32 @@ private fun ReaderContent(
         tonalElevation = 2.dp,
         modifier = Modifier.fillMaxWidth()
       ) {
-        Row(
-          modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
-          horizontalArrangement = Arrangement.SpaceBetween,
-          verticalAlignment = Alignment.CenterVertically
-        ) {
-          FilledTonalButton(onClick = onToggleReaderMode) {
-            Text(
-              if (settings.readerMode == ReaderMode.VERTICAL) "⇄ ${stringResource(R.string.action_paged)}"
-              else "↕ ${stringResource(R.string.action_scroll)}"
-            )
-          }
-          Row {
+        Column(modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
             TextButton(onClick = onPrevChapter) { Text(stringResource(R.string.action_prev_chapter)) }
-            TextButton(onClick = onNextChapter) { Text(stringResource(R.string.action_next_chapter)) }
-          }
-          Row {
             TextButton(onClick = { showToc = true }) { Text(stringResource(R.string.action_toc)) }
             TextButton(onClick = { showSearch = true }) { Text(stringResource(R.string.action_search)) }
             TextButton(onClick = { showBookmarks = true }) { Text(stringResource(R.string.action_bookmark_list)) }
-            TextButton(onClick = { showStyleDialog = true }) { Text("⚙ ${stringResource(R.string.action_style)}") }
+            TextButton(onClick = onNextChapter) { Text(stringResource(R.string.action_next_chapter)) }
+          }
+          Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+          ) {
+            FilledTonalButton(onClick = onToggleReaderMode) {
+              Text(
+                if (settings.readerMode == ReaderMode.VERTICAL) "⇄ ${stringResource(R.string.action_paged)}"
+                else "↕ ${stringResource(R.string.action_scroll)}"
+              )
+            }
+            FilledTonalButton(onClick = { showStyleDialog = true }) {
+              Text("⚙ ${stringResource(R.string.action_style)}")
+            }
           }
         }
       }

@@ -1,12 +1,10 @@
 package com.engreader.app.storage
 
-import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.os.Environment
-import android.provider.MediaStore
 import android.provider.OpenableColumns
 import android.webkit.MimeTypeMap
+import androidx.core.content.FileProvider
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -26,25 +24,22 @@ class EpubImportService(
       val now = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
       val finalName = ensureEpubExtension("${File(fileName).nameWithoutExtension}_$now")
 
-      val values =
-        ContentValues().apply {
-          put(MediaStore.MediaColumns.DISPLAY_NAME, finalName)
-          put(MediaStore.MediaColumns.MIME_TYPE, "application/epub+zip")
-          put(MediaStore.MediaColumns.RELATIVE_PATH, "Documents/EngReader/books")
-        }
-
-      val destinationUri = resolver.insert(MediaStore.Files.getContentUri("external"), values)
-        ?: error("Unable to create destination file")
+      // Store in app-private directory (no storage permissions needed, auto-cleaned on uninstall)
+      val booksDir = File(context.filesDir, "books")
+      if (!booksDir.exists()) booksDir.mkdirs()
+      val destFile = File(booksDir, finalName)
 
       resolver.openInputStream(inputUri).use { input ->
         checkNotNull(input) { "Cannot open source file" }
-        resolver.openOutputStream(destinationUri, "w").use { output ->
-          checkNotNull(output) { "Cannot open destination file" }
+        destFile.outputStream().use { output ->
           input.copyTo(output)
         }
       }
 
-      ImportResult(title = File(fileName).nameWithoutExtension.ifBlank { "Untitled" }, copiedUri = destinationUri)
+      ImportResult(
+        title = File(fileName).nameWithoutExtension.ifBlank { "Untitled" },
+        copiedUri = Uri.fromFile(destFile),
+      )
     }
 
   private fun resolveFileName(uri: Uri): String {
