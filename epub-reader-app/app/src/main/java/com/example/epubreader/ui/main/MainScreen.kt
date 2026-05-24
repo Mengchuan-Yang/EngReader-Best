@@ -31,8 +31,6 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.text.ClickableText
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -58,7 +56,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -99,7 +96,6 @@ import com.engreader.app.model.ShelfViewMode
 import com.engreader.app.model.ThemeMode
 import com.engreader.app.theme.EpubReaderTheme
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -247,7 +243,6 @@ fun MainScreen(
                 onToggleAnnotations = viewModel::toggleAnnotationVisibility,
                 onCycleRepeatMode = viewModel::cycleRepeatAnnotationMode,
                 onToggleChrome = { readerChromeVisible = !readerChromeVisible },
-                onToggleReaderMode = viewModel::toggleReaderMode,
               )
             }
           }
@@ -465,22 +460,12 @@ private fun ReaderContent(
   onToggleAnnotations: () -> Unit,
   onCycleRepeatMode: () -> Unit,
   onToggleChrome: () -> Unit,
-  onToggleReaderMode: () -> Unit,
 ) {
   var showToc by remember { mutableStateOf(false) }
   var showBookmarks by remember { mutableStateOf(false) }
   var showSearch by remember { mutableStateOf(false) }
   var showStyleDialog by remember { mutableStateOf(false) }
-  val scope = rememberCoroutineScope()
   val contentColor = MaterialTheme.colorScheme.onBackground
-  val config = LocalConfiguration.current
-  val density = LocalDensity.current
-  val screenHeightDp = config.screenHeightDp
-  val maxCharsPerPage = remember(screenHeightDp, settings.fontScale, settings.lineHeightScale) {
-    val charsPerLine = ((config.screenWidthDp - 24) * density.density / (10f * settings.fontScale)).toInt()
-    val linesPerPage = (screenHeightDp * density.density / (20f * settings.lineHeightScale * settings.fontScale)).toInt()
-    (charsPerLine * linesPerPage).coerceIn(1200, 5000)
-  }
 
   Column(modifier = Modifier
     .fillMaxSize()
@@ -500,10 +485,9 @@ private fun ReaderContent(
       )
     }
 
-    if (settings.readerMode == ReaderMode.VERTICAL) {
-      val paragraphSpacingDp = (14 * settings.paragraphSpacingScale).dp
-      val horizontalMarginDp = (12 * settings.marginScale).dp
-      LazyColumn(modifier = Modifier.weight(1f).padding(horizontal = horizontalMarginDp), verticalArrangement = Arrangement.spacedBy(paragraphSpacingDp)) {
+    val paragraphSpacingDp = (14 * settings.paragraphSpacingScale).dp
+    val horizontalMarginDp = (12 * settings.marginScale).dp
+    LazyColumn(modifier = Modifier.weight(1f).padding(horizontal = horizontalMarginDp), verticalArrangement = Arrangement.spacedBy(paragraphSpacingDp)) {
         items(state.currentChapter.paragraphs.size) { paragraphIndex ->
           val paragraph = state.currentChapter.paragraphs[paragraphIndex]
           val paragraphAnnotations =
@@ -554,83 +538,6 @@ private fun ReaderContent(
           }
         }
       }
-    } else {
-      val segments = remember(state.currentChapter.paragraphs, state.annotations, settings.showAnnotations, maxCharsPerPage) {
-        buildPagedSegments(
-          paragraphs = state.currentChapter.paragraphs,
-          annotations = state.annotations.filter { it.chapterIndex == state.currentChapter.index },
-          showAnnotations = settings.showAnnotations,
-          maxCharsPerPage = maxCharsPerPage,
-        )
-      }
-      val initialPage = remember(segments, state.currentParagraphIndex) { findPageForParagraph(segments, state.currentParagraphIndex) }
-      val pagerState = rememberPagerState(initialPage = initialPage, pageCount = { segments.size.coerceAtLeast(1) })
-      LaunchedEffect(pagerState.currentPage) {
-        segments.getOrNull(pagerState.currentPage)?.let { onParagraphChange(it.startParagraphIndex) }
-      }
-      Box(modifier = Modifier.weight(1f)) {
-        HorizontalPager(state = pagerState, modifier = Modifier.fillMaxSize()) { page ->
-        val segment = segments.getOrElse(page) { ReaderPageSegment(0, "") }
-        val horizontalMarginDp = (12 * settings.marginScale).dp
-        Box(modifier = Modifier
-          .fillMaxSize()
-          .clickable(
-            indication = null,
-            interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-          ) {
-            if (!chromeVisible) onToggleChrome()
-          }
-          .pointerInput(segment) {
-            detectTapGestures(
-              onLongPress = {
-                if (chromeVisible) {
-                  onParagraphChange(segment.startParagraphIndex)
-                  onSentenceLongPress(state.currentChapter.index, segment.startParagraphIndex, segment.text)
-                }
-              }
-            )
-          },
-          contentAlignment = Alignment.TopCenter
-        ) {
-          Text(
-            text = segment.text,
-            style =
-              TextStyle(
-                fontFamily = FontFamily.Serif,
-                fontSize = (19f * settings.fontScale).sp,
-                lineHeight = (31f * settings.lineHeightScale).sp,
-                textIndent = TextIndent(firstLine = 22.sp),
-                color = contentColor,
-              ),
-            modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp).padding(top = 6.dp, start = horizontalMarginDp, end = horizontalMarginDp),
-          )
-        }
-      }
-        // Paged nav arrows
-        Text(
-          text = "<", fontSize = 36.sp,
-          color = contentColor.copy(alpha = 0.3f),
-          modifier = Modifier
-            .align(Alignment.CenterStart).padding(start = 2.dp)
-            .clickable {
-              if (pagerState.currentPage > 0) {
-                scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
-              } else { onPrevChapter() }
-            },
-        )
-        Text(
-          text = ">", fontSize = 36.sp,
-          color = contentColor.copy(alpha = 0.3f),
-          modifier = Modifier
-            .align(Alignment.CenterEnd).padding(end = 2.dp)
-            .clickable {
-              if (pagerState.currentPage < segments.size - 1) {
-                scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) }
-              } else { onNextChapter() }
-            },
-        )
-      }
-    }
 
     if (chromeVisible) {
       HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
@@ -653,15 +560,9 @@ private fun ReaderContent(
           }
           Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
           ) {
-            FilledTonalButton(onClick = onToggleReaderMode) {
-              Text(
-                if (settings.readerMode == ReaderMode.VERTICAL) "⇄ ${stringResource(R.string.action_paged)}"
-                else "↕ ${stringResource(R.string.action_scroll)}"
-              )
-            }
             FilledTonalButton(onClick = { showStyleDialog = true }) {
               Text("⚙ ${stringResource(R.string.action_style)}")
             }
@@ -806,59 +707,6 @@ private fun repeatModeLabel(mode: RepeatAnnotationMode): String {
     RepeatAnnotationMode.CHAPTER_AUTO -> stringResource(R.string.repeat_chapter_auto)
     RepeatAnnotationMode.BOOK_AUTO -> stringResource(R.string.repeat_book_auto)
   }
-}
-private data class ReaderPageSegment(
-  val startParagraphIndex: Int,
-  val text: String,
-)
-
-private fun buildPagedSegments(
-  paragraphs: List<String>,
-  annotations: List<AnnotationRecord>,
-  showAnnotations: Boolean,
-  maxCharsPerPage: Int = 2400,
-): List<ReaderPageSegment> {
-  if (paragraphs.isEmpty()) return listOf(ReaderPageSegment(0, ""))
-  val result = mutableListOf<ReaderPageSegment>()
-  var pageStartParagraph = 0
-  var currentLength = 0
-  val builder = StringBuilder()
-
-  for (paragraphIndex in paragraphs.indices) {
-    val paragraph = paragraphs[paragraphIndex]
-    val paragraphAnnotations = annotations.filter { it.paragraphIndex == paragraphIndex }
-    val rendered = renderParagraphWithAnnotations(paragraph, paragraphAnnotations, showAnnotations).text.trim()
-    val candidateLength = if (builder.isEmpty()) rendered.length else currentLength + rendered.length + 2
-
-    if (builder.isNotEmpty() && candidateLength > maxCharsPerPage) {
-      result += ReaderPageSegment(pageStartParagraph, builder.toString())
-      builder.clear()
-      pageStartParagraph = paragraphIndex
-      currentLength = 0
-    }
-
-    if (builder.isNotEmpty()) builder.append("\n\n")
-    builder.append(rendered)
-    currentLength = builder.length
-  }
-
-  if (builder.isNotEmpty()) {
-    result += ReaderPageSegment(pageStartParagraph, builder.toString())
-  }
-  return if (result.isEmpty()) listOf(ReaderPageSegment(0, "")) else result
-}
-
-private fun findPageForParagraph(segments: List<ReaderPageSegment>, paragraphIndex: Int): Int {
-  if (segments.isEmpty()) return 0
-  var bestIndex = 0
-  for (index in segments.indices) {
-    if (segments[index].startParagraphIndex <= paragraphIndex) {
-      bestIndex = index
-    } else {
-      break
-    }
-  }
-  return bestIndex
 }
 
 private fun renderParagraphWithAnnotations(
