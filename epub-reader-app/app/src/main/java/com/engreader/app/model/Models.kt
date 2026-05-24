@@ -109,6 +109,7 @@ data class ChapterContent(
   val index: Int,
   val title: String,
   val paragraphs: List<String>,
+  val styledParagraphs: List<androidx.compose.ui.text.AnnotatedString> = emptyList(),
 )
 
 data class ParsedBook(
