@@ -17,7 +17,7 @@ serializationJson = "1.9.0"
 epub4j = "4.2.3"
 room = "2.8.4"
 securityCrypto = "1.1.0"
-ksp = "2.3.20-1.0.29"
+ksp = "2.3.8"
 
 [libraries]
 androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidxCore" }

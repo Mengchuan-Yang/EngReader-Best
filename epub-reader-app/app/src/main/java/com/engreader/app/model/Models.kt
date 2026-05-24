@@ -2,6 +2,11 @@ package com.engreader.app.model
 
 import kotlinx.serialization.Serializable
 
+sealed class ParagraphSegment {
+  data class TextSegment(val text: String) : ParagraphSegment()
+  data class ImageSegment(val imagePath: String, val altText: String) : ParagraphSegment()
+}
+
 @Serializable
 data class BookRecord(
   val id: String,
@@ -69,6 +74,7 @@ data class ReaderSettings(
   val repeatAnnotationMode: RepeatAnnotationMode = RepeatAnnotationMode.TAP_ONLY,
   val shelfSortMode: ShelfSortMode = ShelfSortMode.RECENT,
   val shelfViewMode: ShelfViewMode = ShelfViewMode.GRID,
+  val justifyText: Boolean = false,
 )
 
 @Serializable
@@ -110,6 +116,7 @@ data class ChapterContent(
   val title: String,
   val paragraphs: List<String>,
   val styledParagraphs: List<androidx.compose.ui.text.AnnotatedString> = emptyList(),
+  val segments: List<List<ParagraphSegment>> = emptyList(),
 )
 
 data class ParsedBook(

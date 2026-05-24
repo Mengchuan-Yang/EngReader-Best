@@ -31,13 +31,18 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.ClickableText
+import androidx.compose.foundation.text.BasicText
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalDrawerSheet
+import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -50,17 +55,21 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
@@ -70,13 +79,17 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.Hyphens
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextIndent
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.view.WindowCompat
@@ -89,6 +102,8 @@ import com.engreader.app.ai.AiProvider
 import com.engreader.app.model.AnnotationRecord
 import com.engreader.app.model.AnnotationType
 import com.engreader.app.model.BookRecord
+import com.engreader.app.model.ChapterContent
+import com.engreader.app.model.ParagraphSegment
 import com.engreader.app.model.ReaderMode
 import com.engreader.app.model.RepeatAnnotationMode
 import com.engreader.app.model.ShelfSortMode
@@ -96,6 +111,7 @@ import com.engreader.app.model.ShelfViewMode
 import com.engreader.app.model.ThemeMode
 import com.engreader.app.theme.EpubReaderTheme
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -113,6 +129,8 @@ fun MainScreen(
   var selectedProvider by remember { mutableStateOf(AiProvider.DEEPSEEK) }
   var apiKeyInput by remember { mutableStateOf("") }
   var readerChromeVisible by rememberSaveable(state.screen, state.readerState?.book?.id) { mutableStateOf(false) }
+  val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
+  val coroutineScope = rememberCoroutineScope()
 
   val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
     if (uri != null) viewModel.importFromUri(uri)
@@ -149,12 +167,58 @@ fun MainScreen(
   EpubReaderTheme(themeMode = state.settings.themeMode) {
     ImmersiveSystemBars(enabled = state.screen == AppScreen.Reader && !readerChromeVisible)
 
+    val isShelf = state.screen == AppScreen.Shelf
+    ModalNavigationDrawer(
+      drawerState = drawerState,
+      gesturesEnabled = isShelf,
+      drawerContent = {
+        ModalDrawerSheet {
+          Text(
+            stringResource(R.string.app_name),
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(16.dp),
+          )
+          HorizontalDivider()
+          TextButton(onClick = {
+            viewModel.toggleShelfViewMode()
+          }, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            Text(if (state.settings.shelfViewMode == ShelfViewMode.GRID) stringResource(R.string.action_list) else stringResource(R.string.action_grid))
+          }
+          TextButton(onClick = {
+            viewModel.cycleSortMode()
+          }, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            Text("Sort: ${sortLabel(state.settings.shelfSortMode)}")
+          }
+          TextButton(onClick = {
+            viewModel.cycleThemeMode()
+          }, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            Text("Theme: ${themeLabel(state.settings.themeMode)}")
+          }
+          HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+          TextButton(onClick = {
+            showApiDialog = true
+          }, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            Text(stringResource(R.string.action_api_settings))
+          }
+          TextButton(onClick = {
+            exportBackupLauncher.launch("engreader_backup.zip")
+          }, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            Text(stringResource(R.string.action_export_backup))
+          }
+          TextButton(onClick = {
+            restoreBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream"))
+          }, modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+            Text(stringResource(R.string.action_restore_backup))
+          }
+        }
+      }
+    ) {
     Scaffold(
       modifier = modifier,
       contentWindowInsets = WindowInsets(0, 0, 0, 0),
       snackbarHost = { SnackbarHost(snackbarHostState) },
       floatingActionButton = {
-        if (state.screen == AppScreen.Shelf) {
+        if (isShelf) {
           FloatingActionButton(onClick = {
             importLauncher.launch(arrayOf("application/epub+zip", "application/octet-stream"))
           }) {
@@ -167,20 +231,13 @@ fun MainScreen(
           AppScreen.Shelf -> {
             TopAppBar(
               title = { },
-              actions = {
-                TextButton(onClick = { viewModel.toggleShelfViewMode() }) {
-                  Text(if (state.settings.shelfViewMode == ShelfViewMode.GRID) stringResource(R.string.action_list) else stringResource(R.string.action_grid))
+              navigationIcon = {
+                IconButton(onClick = {
+                  coroutineScope.launch { drawerState.open() }
+                }) {
+                  Text("☰", style = MaterialTheme.typography.headlineSmall)
                 }
-                TextButton(onClick = { viewModel.cycleSortMode() }) { Text(sortLabel(state.settings.shelfSortMode)) }
-                TextButton(onClick = { viewModel.cycleThemeMode() }) { Text(themeLabel(state.settings.themeMode)) }
-                TextButton(onClick = { showApiDialog = true }) { Text(stringResource(R.string.action_api_settings)) }
-                TextButton(onClick = { exportBackupLauncher.launch("engreader_backup.zip") }) {
-                  Text(stringResource(R.string.action_export_backup))
-                }
-                TextButton(onClick = { restoreBackupLauncher.launch(arrayOf("application/zip", "application/octet-stream")) }) {
-                  Text(stringResource(R.string.action_restore_backup))
-                }
-              }
+              },
             )
           }
 
@@ -222,7 +279,10 @@ fun MainScreen(
                 state = reader,
                 settings = state.settings,
                 chromeVisible = readerChromeVisible,
+                scrollToChapterIndex = state.scrollToChapterIndex,
                 onChapterChange = viewModel::setChapter,
+                onChapterScrolledTo = viewModel::onChapterScrolledTo,
+                onClearScrollTarget = viewModel::clearScrollTarget,
                 onPrevChapter = viewModel::prevChapter,
                 onNextChapter = viewModel::nextChapter,
                 onParagraphChange = viewModel::setCurrentParagraph,
@@ -243,6 +303,8 @@ fun MainScreen(
                 onToggleAnnotations = viewModel::toggleAnnotationVisibility,
                 onCycleRepeatMode = viewModel::cycleRepeatAnnotationMode,
                 onToggleChrome = { readerChromeVisible = !readerChromeVisible },
+                justifyText = state.settings.justifyText,
+                onToggleJustify = viewModel::toggleJustify,
               )
             }
           }
@@ -251,6 +313,7 @@ fun MainScreen(
           CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
         }
       }
+    }
     }
   }
 
@@ -439,7 +502,10 @@ private fun ReaderContent(
   state: ReaderUiState,
   settings: com.engreader.app.model.ReaderSettings,
   chromeVisible: Boolean,
+  scrollToChapterIndex: Int?,
   onChapterChange: (Int) -> Unit,
+  onChapterScrolledTo: (Int) -> Unit,
+  onClearScrollTarget: () -> Unit,
   onPrevChapter: () -> Unit,
   onNextChapter: () -> Unit,
   onParagraphChange: (Int) -> Unit,
@@ -460,6 +526,8 @@ private fun ReaderContent(
   onToggleAnnotations: () -> Unit,
   onCycleRepeatMode: () -> Unit,
   onToggleChrome: () -> Unit,
+  justifyText: Boolean,
+  onToggleJustify: () -> Unit,
 ) {
   var showToc by remember { mutableStateOf(false) }
   var showBookmarks by remember { mutableStateOf(false) }
@@ -485,51 +553,164 @@ private fun ReaderContent(
       )
     }
 
+    val flatItems = remember(state.chapters) { buildFlatItems(state.chapters) }
+    val listState = rememberLazyListState()
+
+    // Detect chapter changes during scroll
+    LaunchedEffect(listState.firstVisibleItemIndex, state.chapters.size) {
+      val item = flatItems.getOrNull(listState.firstVisibleItemIndex)
+      val newChapterIndex = when (item) {
+        is FlatItem.ChapterHeader -> item.chapterIndex
+        is FlatItem.Paragraph -> item.chapterIndex
+        null -> return@LaunchedEffect
+      }
+      if (newChapterIndex != state.currentChapterIndex) {
+        onChapterScrolledTo(newChapterIndex)
+      }
+    }
+
+    // Scroll to target chapter on TOC click / search result
+    LaunchedEffect(scrollToChapterIndex) {
+      scrollToChapterIndex?.let { targetChapter ->
+        val targetIndex = flatItems.indexOfFirst {
+          it is FlatItem.ChapterHeader && it.chapterIndex == targetChapter
+        }
+        if (targetIndex >= 0) {
+          listState.scrollToItem(targetIndex)
+          onClearScrollTarget()
+        }
+      }
+    }
+
     val paragraphSpacingDp = (14 * settings.paragraphSpacingScale).dp
     val horizontalMarginDp = (12 * settings.marginScale).dp
-    LazyColumn(modifier = Modifier.weight(1f).padding(horizontal = horizontalMarginDp), verticalArrangement = Arrangement.spacedBy(paragraphSpacingDp)) {
-        items(state.currentChapter.paragraphs.size) { paragraphIndex ->
-          val paragraph = state.currentChapter.paragraphs[paragraphIndex]
-          val paragraphAnnotations =
-            state.annotations.filter { it.chapterIndex == state.currentChapter.index && it.paragraphIndex == paragraphIndex }
-          Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-            Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
-              ClickableText(
-                text = renderParagraphWithAnnotations(paragraph, paragraphAnnotations, settings.showAnnotations),
-                style =
-                  TextStyle(
-                    fontFamily = FontFamily.Serif,
-                    fontSize = (18f * settings.fontScale).sp,
-                    lineHeight = (30f * settings.lineHeightScale).sp,
-                    textIndent = TextIndent(firstLine = 22.sp),
-                    color = contentColor,
-                  ),
-                modifier = Modifier.pointerInput(paragraph) {
-                  detectTapGestures(
-                    onLongPress = {
-                      onParagraphChange(paragraphIndex)
-                      onSentenceLongPress(state.currentChapter.index, paragraphIndex, paragraph)
-                    }
-                  )
-                },
-                onClick = { offset ->
-                  if (!chromeVisible) {
-                    onToggleChrome()
-                  } else {
-                    onParagraphChange(paragraphIndex)
-                    val mappedOffset =
-                      mapRenderedOffsetToOriginal(paragraph, paragraphAnnotations, settings.showAnnotations, offset)
-                    if (mappedOffset >= 0) {
-                      onWordTap(state.currentChapter.index, paragraphIndex, paragraph, mappedOffset)
+    LazyColumn(
+      state = listState,
+      modifier = Modifier.weight(1f).padding(horizontal = horizontalMarginDp),
+      verticalArrangement = Arrangement.spacedBy(paragraphSpacingDp),
+    ) {
+      items(flatItems.size) { index ->
+        when (val item = flatItems[index]) {
+          is FlatItem.ChapterHeader -> {
+            Box(
+              modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onToggleChrome() }
+                .padding(top = if (item.chapterIndex == 0) 0.dp else 12.dp, bottom = 4.dp),
+              contentAlignment = Alignment.Center,
+            ) {
+              HorizontalDivider(
+                modifier = Modifier.fillMaxWidth(),
+                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+              )
+              Text(
+                text = item.title,
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.SemiBold),
+                color = contentColor.copy(alpha = 0.6f),
+                modifier = Modifier
+                  .background(MaterialTheme.colorScheme.background)
+                  .padding(horizontal = 12.dp, vertical = 2.dp),
+              )
+            }
+          }
+
+          is FlatItem.Paragraph -> {
+            val paragraphAnnotations =
+              state.annotations.filter {
+                it.chapterIndex == item.chapterIndex && it.paragraphIndex == item.paragraphIndex
+              }
+            val textAlign = if (justifyText) TextAlign.Justify else TextAlign.Left
+            val hasImages = item.segments.any { it is ParagraphSegment.ImageSegment }
+            Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+              if (hasImages) {
+                Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
+                  item.segments.forEach { segment ->
+                    when (segment) {
+                      is ParagraphSegment.TextSegment -> {
+                        val displayText = if (item.styledText != null) {
+                          renderAnnotatedWithAnnotations(item.styledText, paragraphAnnotations, settings.showAnnotations)
+                        } else {
+                          renderParagraphWithAnnotations(segment.text, paragraphAnnotations, settings.showAnnotations)
+                        }
+                        ParagraphWithGestures(
+                          displayText = displayText,
+                          originalText = item.text,
+                          textAlign = textAlign,
+                          fontSize = (18f * settings.fontScale).sp,
+                          lineHeight = (30f * settings.lineHeightScale).sp,
+                          contentColor = contentColor,
+                          paragraphAnnotations = paragraphAnnotations,
+                          settings = settings,
+                          onParagraphChange = { onParagraphChange(item.paragraphIndex) },
+                          onWordTap = { mappedOffset ->
+                            onWordTap(item.chapterIndex, item.paragraphIndex, item.text, mappedOffset)
+                          },
+                          onSentenceLongPress = { mappedOffset ->
+                            val sentence = extractSentenceAtOffset(item.text, mappedOffset)
+                            onSentenceLongPress(item.chapterIndex, item.paragraphIndex, sentence)
+                          },
+                          onToggleChrome = onToggleChrome,
+                        )
+                      }
+
+                      is ParagraphSegment.ImageSegment -> {
+                        val bitmap = runCatching { BitmapFactory.decodeFile(segment.imagePath) }.getOrNull()
+                        if (bitmap != null) {
+                          Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = segment.altText.ifBlank { "image" },
+                            modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(vertical = 8.dp)
+                              .clip(RoundedCornerShape(8.dp)),
+                          )
+                        }
+                      }
                     }
                   }
-                },
-              )
-              if (chromeVisible && paragraphAnnotations.isNotEmpty()) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
-                  paragraphAnnotations.forEach { annotation ->
-                    TextButton(onClick = { onRemoveAnnotation(annotation.id) }) {
-                      Text(if (annotation.type == AnnotationType.WORD) annotation.anchorText else "句注")
+                  if (chromeVisible && paragraphAnnotations.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                      paragraphAnnotations.forEach { annotation ->
+                        TextButton(onClick = { onRemoveAnnotation(annotation.id) }) {
+                          Text(if (annotation.type == AnnotationType.WORD) annotation.anchorText else "句注")
+                        }
+                      }
+                    }
+                  }
+                }
+              } else {
+                val displayText = if (item.styledText != null) {
+                  renderAnnotatedWithAnnotations(item.styledText, paragraphAnnotations, settings.showAnnotations)
+                } else {
+                  renderParagraphWithAnnotations(item.text, paragraphAnnotations, settings.showAnnotations)
+                }
+                Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
+                  ParagraphWithGestures(
+                    displayText = displayText,
+                    originalText = item.text,
+                    textAlign = textAlign,
+                    fontSize = (18f * settings.fontScale).sp,
+                    lineHeight = (30f * settings.lineHeightScale).sp,
+                    contentColor = contentColor,
+                    paragraphAnnotations = paragraphAnnotations,
+                    settings = settings,
+                    onParagraphChange = { onParagraphChange(item.paragraphIndex) },
+                    onWordTap = { mappedOffset ->
+                      onWordTap(item.chapterIndex, item.paragraphIndex, item.text, mappedOffset)
+                    },
+                    onSentenceLongPress = { mappedOffset ->
+                      val sentence = extractSentenceAtOffset(item.text, mappedOffset)
+                      onSentenceLongPress(item.chapterIndex, item.paragraphIndex, sentence)
+                    },
+                    onToggleChrome = onToggleChrome,
+                  )
+                  if (chromeVisible && paragraphAnnotations.isNotEmpty()) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                      paragraphAnnotations.forEach { annotation ->
+                        TextButton(onClick = { onRemoveAnnotation(annotation.id) }) {
+                          Text(if (annotation.type == AnnotationType.WORD) annotation.anchorText else "句注")
+                        }
+                      }
                     }
                   }
                 }
@@ -538,6 +719,7 @@ private fun ReaderContent(
           }
         }
       }
+    }
 
     if (chromeVisible) {
       HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
@@ -694,6 +876,12 @@ private fun ReaderContent(
             Text("%.1f".format(settings.marginScale), modifier = Modifier.width(40.dp), textAlign = TextAlign.Center)
             Button(onClick = onIncreaseMargin) { Text("+") }
           }
+          Text("Text Alignment", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+          Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Button(onClick = onToggleJustify) {
+              Text(if (justifyText) "Left" else "Justify")
+            }
+          }
         }
       },
     )
@@ -715,7 +903,7 @@ private fun renderParagraphWithAnnotations(
   showAnnotations: Boolean,
 ): AnnotatedString {
   if (!showAnnotations || annotations.isEmpty()) return AnnotatedString(paragraph)
-  val noteStyle = SpanStyle(fontSize = 13.sp, color = Color(0xFF9CA3AF))
+  val noteStyle = SpanStyle(fontSize = 13.sp, color = Color(0xFFE53935))
   val styleRanges = mutableListOf<Pair<Int, Int>>()
   var rendered = paragraph
 
@@ -734,12 +922,24 @@ private fun renderParagraphWithAnnotations(
     }
   }
 
-  annotations.filter { it.type == AnnotationType.SENTENCE }.forEach { annotation ->
-    val note = "\uFF08${annotation.translation}\uFF09"
-    if (!rendered.endsWith(note)) {
-      val start = rendered.length
-      rendered += note
-      styleRanges += start to (start + note.length)
+  val sentenceAnnotations = annotations.filter { it.type == AnnotationType.SENTENCE }
+    .sortedBy { paragraph.indexOf(it.anchorText, ignoreCase = true) }
+  sentenceAnnotations.forEach { annotation ->
+    val index = rendered.indexOf(annotation.anchorText, startIndex = searchStart, ignoreCase = true)
+    if (index >= 0) {
+      val insertAt = index + annotation.anchorText.length
+      val note = "\uFF08${annotation.translation}\uFF09"
+      rendered = rendered.substring(0, insertAt) + note + rendered.substring(insertAt)
+      styleRanges += insertAt to (insertAt + note.length)
+      searchStart = insertAt + note.length
+    } else {
+      // Fallback: append at end if sentence not found
+      val note = "\uFF08${annotation.translation}\uFF09"
+      if (!rendered.endsWith(note)) {
+        val start = rendered.length
+        rendered += note
+        styleRanges += start to (start + note.length)
+      }
     }
   }
 
@@ -748,6 +948,165 @@ private fun renderParagraphWithAnnotations(
     builder.addStyle(noteStyle, start, end)
   }
   return builder.toAnnotatedString()
+}
+
+private fun renderAnnotatedWithAnnotations(
+  styled: AnnotatedString,
+  annotations: List<AnnotationRecord>,
+  showAnnotations: Boolean,
+): AnnotatedString {
+  if (!showAnnotations || annotations.isEmpty()) return styled
+  val paragraph = styled.text
+  val noteStyle = SpanStyle(fontSize = 13.sp, color = Color(0xFFE53935))
+  data class Insertion(val at: Int, val length: Int)
+  val insertions = mutableListOf<Insertion>()
+  var rendered = paragraph
+
+  val wordAnnotations = annotations
+    .filter { it.type == AnnotationType.WORD }
+    .sortedBy { paragraph.indexOf(it.anchorText, ignoreCase = true) }
+  var searchStart = 0
+  wordAnnotations.forEach { annotation ->
+    val index = rendered.indexOf(annotation.anchorText, startIndex = searchStart, ignoreCase = true)
+    if (index >= 0) {
+      val insertAt = index + annotation.anchorText.length
+      val note = "\uFF08${annotation.translation}\uFF09"
+      rendered = rendered.substring(0, insertAt) + note + rendered.substring(insertAt)
+      insertions += Insertion(insertAt, note.length)
+      searchStart = insertAt + note.length
+    }
+  }
+
+  val sentenceAnnotations = annotations.filter { it.type == AnnotationType.SENTENCE }
+    .sortedBy { rendered.indexOf(it.anchorText, startIndex = searchStart, ignoreCase = true) }
+  sentenceAnnotations.forEach { annotation ->
+    val index = rendered.indexOf(annotation.anchorText, startIndex = searchStart, ignoreCase = true)
+    if (index >= 0) {
+      val insertAt = index + annotation.anchorText.length
+      val note = "\uFF08${annotation.translation}\uFF09"
+      rendered = rendered.substring(0, insertAt) + note + rendered.substring(insertAt)
+      insertions += Insertion(insertAt, note.length)
+      searchStart = insertAt + note.length
+    } else {
+      val note = "\uFF08${annotation.translation}\uFF09"
+      if (!rendered.endsWith(note)) {
+        val start = rendered.length
+        rendered += note
+        insertions += Insertion(start, note.length)
+      }
+    }
+  }
+
+  val builder = AnnotatedString.Builder(rendered)
+  // Copy original styles, adjusting offsets for insertions that occurred before each style
+  styled.spanStyles.forEach { spanStyle ->
+    val adjustment = insertions
+      .filter { it.at <= spanStyle.start }
+      .sumOf { it.length }
+    val newStart = spanStyle.start + adjustment
+    val newEnd = spanStyle.end + adjustment
+    builder.addStyle(spanStyle.item, newStart, newEnd)
+  }
+  // Overlay annotation styles
+  insertions.forEach { insertion ->
+    builder.addStyle(noteStyle, insertion.at, insertion.at + insertion.length)
+  }
+  return builder.toAnnotatedString()
+}
+
+private fun extractSentenceAtOffset(text: String, offset: Int): String {
+  if (text.isEmpty() || offset !in text.indices) return text
+  // Expand to find sentence boundaries (., !, ?)
+  val sentenceEnds = setOf('.', '!', '?')
+  var start = offset
+  var end = offset
+  // Go left to find start of sentence
+  while (start > 0) {
+    val ch = text[start - 1]
+    if (ch == '\n' || (sentenceEnds.contains(ch) && (start >= text.length || text[start].isWhitespace()))) {
+      break
+    }
+    start--
+  }
+  // Skip leading whitespace and newlines
+  while (start < text.length && (text[start].isWhitespace())) start++
+  // Go right to find end of sentence
+  while (end < text.length) {
+    val ch = text[end]
+    if (sentenceEnds.contains(ch)) {
+      end++ // include the punctuation
+      break
+    }
+    if (ch == '\n') break
+    end++
+  }
+  val result = text.substring(start, end.coerceAtMost(text.length)).trim()
+  return result.ifBlank { text.trim().take(100) }
+}
+
+@Composable
+private fun ParagraphWithGestures(
+  displayText: AnnotatedString,
+  originalText: String,
+  textAlign: TextAlign,
+  fontSize: TextUnit,
+  lineHeight: TextUnit,
+  contentColor: Color,
+  paragraphAnnotations: List<AnnotationRecord>,
+  settings: com.engreader.app.model.ReaderSettings,
+  onParagraphChange: () -> Unit,
+  onWordTap: (Int) -> Unit,
+  onSentenceLongPress: (Int) -> Unit,
+  onToggleChrome: () -> Unit,
+) {
+  var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
+  var pressPixelOffset by remember { mutableStateOf(Offset.Zero) }
+
+  BasicText(
+    text = displayText,
+    style = TextStyle(
+      fontFamily = FontFamily.Serif,
+      fontSize = fontSize,
+      lineHeight = lineHeight,
+      textAlign = textAlign,
+      textIndent = TextIndent(firstLine = 22.sp),
+      color = contentColor,
+      hyphens = if (textAlign == TextAlign.Justify) Hyphens.Auto else Hyphens.Unspecified,
+    ),
+    onTextLayout = { textLayoutResult = it },
+    modifier = Modifier
+      .fillMaxWidth()
+      .pointerInput(displayText) {
+        detectTapGestures(
+          onPress = { offset ->
+            pressPixelOffset = offset
+            tryAwaitRelease()
+          },
+          onTap = {
+            val layout = textLayoutResult ?: return@detectTapGestures
+            val charOffset = layout.getOffsetForPosition(pressPixelOffset)
+            onParagraphChange()
+            val mappedOffset =
+              mapRenderedOffsetToOriginal(originalText, paragraphAnnotations, settings.showAnnotations, charOffset)
+            if (mappedOffset >= 0 && originalText.getOrNull(mappedOffset)?.isLetter() == true) {
+              onWordTap(mappedOffset)
+            } else {
+              onToggleChrome()
+            }
+          },
+          onLongPress = { offset ->
+            val layout = textLayoutResult ?: return@detectTapGestures
+            val charOffset = layout.getOffsetForPosition(offset)
+            onParagraphChange()
+            val mappedOffset =
+              mapRenderedOffsetToOriginal(originalText, paragraphAnnotations, settings.showAnnotations, charOffset)
+            if (mappedOffset >= 0) {
+              onSentenceLongPress(mappedOffset)
+            }
+          },
+        )
+      },
+  )
 }
 
 private fun mapRenderedOffsetToOriginal(
@@ -773,12 +1132,23 @@ private fun mapRenderedOffsetToOriginal(
     }
   }
 
-  annotations.filter { it.type == AnnotationType.SENTENCE }.forEach { annotation ->
-    val note = "\uFF08${annotation.translation}\uFF09"
-    if (!rendered.endsWith(note)) {
-      val start = rendered.length
-      rendered += note
-      insertions += Insertion(start, note.length)
+  val sentenceAnnotations = annotations.filter { it.type == AnnotationType.SENTENCE }
+    .sortedBy { rendered.indexOf(it.anchorText, startIndex = searchStart, ignoreCase = true) }
+  sentenceAnnotations.forEach { annotation ->
+    val index = rendered.indexOf(annotation.anchorText, startIndex = searchStart, ignoreCase = true)
+    if (index >= 0) {
+      val insertAt = index + annotation.anchorText.length
+      val note = "\uFF08${annotation.translation}\uFF09"
+      rendered = rendered.substring(0, insertAt) + note + rendered.substring(insertAt)
+      insertions += Insertion(insertAt, note.length)
+      searchStart = insertAt + note.length
+    } else {
+      val note = "\uFF08${annotation.translation}\uFF09"
+      if (!rendered.endsWith(note)) {
+        val start = rendered.length
+        rendered += note
+        insertions += Insertion(start, note.length)
+      }
     }
   }
 
@@ -800,4 +1170,32 @@ private fun nextProvider(current: AiProvider): AiProvider {
     AiProvider.GEMINI -> AiProvider.OPENAI
     AiProvider.OPENAI -> AiProvider.DEEPSEEK
   }
+}
+
+private sealed class FlatItem {
+  data class ChapterHeader(val chapterIndex: Int, val title: String) : FlatItem()
+  data class Paragraph(
+    val chapterIndex: Int,
+    val paragraphIndex: Int,
+    val text: String,
+    val styledText: AnnotatedString?,
+    val segments: List<com.engreader.app.model.ParagraphSegment>,
+  ) : FlatItem()
+}
+
+private fun buildFlatItems(chapters: List<ChapterContent>): List<FlatItem> {
+  val items = mutableListOf<FlatItem>()
+  for (chapter in chapters) {
+    items += FlatItem.ChapterHeader(chapter.index, chapter.title)
+    for (i in chapter.paragraphs.indices) {
+      items += FlatItem.Paragraph(
+        chapterIndex = chapter.index,
+        paragraphIndex = i,
+        text = chapter.paragraphs[i],
+        styledText = chapter.styledParagraphs.getOrNull(i),
+        segments = chapter.segments.getOrNull(i).orEmpty(),
+      )
+    }
+  }
+  return items
 }

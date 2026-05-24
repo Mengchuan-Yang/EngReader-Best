@@ -84,11 +84,18 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
           val result = importService.importFromUri(uri)
           val metadata = textExtractor.extractMetadata(result.copiedUri)
           val preferredTitle = metadata.title ?: result.title
-          stateStore.upsertBook(
+          val book = stateStore.upsertBook(
             title = preferredTitle,
             sourceUri = result.copiedUri.toString(),
             author = metadata.author.orEmpty(),
           )
+          // Extract cover immediately during import
+          launch {
+            val coverPath = textExtractor.extractCover(result.copiedUri, book.id)
+            if (coverPath.isNotBlank()) {
+              stateStore.updateBookMetadata(book.id, coverPath = coverPath)
+            }
+          }
         }
         .onSuccess {
           _uiState.update { it.copy(isLoading = false, transientMessage = appContext.getString(R.string.msg_import_success)) }
@@ -106,14 +113,16 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   fun openBook(book: BookRecord) {
     viewModelScope.launch {
       _uiState.update { it.copy(isLoading = true, transientMessage = null) }
+      val initialCount = 5
       runCatching {
-          val parsed = textExtractor.parseBook(Uri.parse(book.sourceUri))
+          // Load metadata and first few chapters quickly
+          val parsed = textExtractor.parseBook(Uri.parse(book.sourceUri), book.id, 0, initialCount)
           if (!parsed.bookTitle.isNullOrBlank() || !parsed.author.isNullOrBlank()) {
             stateStore.updateBookMetadata(book.id, parsed.bookTitle, parsed.author, parsed.chapters.size)
           } else if (parsed.chapters.isNotEmpty()) {
             stateStore.updateBookMetadata(book.id, totalChapters = parsed.chapters.size)
           }
-          // Extract cover on background, don't block book opening
+          // Extract cover on background
           launch {
             val coverPath = textExtractor.extractCover(Uri.parse(book.sourceUri), book.id)
             if (coverPath.isNotBlank()) {
@@ -122,10 +131,10 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
           }
           val effectiveBook = book.copy(title = parsed.bookTitle ?: book.title, author = parsed.author ?: book.author)
           val progress = stateStore.getProgress(book.id)
-          val initialIndex = progress?.chapterIndex?.coerceIn(0, parsed.chapters.lastIndex) ?: 0
+          val initialIndex = progress?.chapterIndex?.coerceIn(0, (parsed.chapters.size - 1).coerceAtLeast(0)) ?: 0
           val chapterSize = parsed.chapters.getOrNull(initialIndex)?.paragraphs?.size ?: 0
           val initialParagraphIndex = progress?.paragraphIndex?.coerceIn(0, (chapterSize - 1).coerceAtLeast(0)) ?: 0
-          ReaderUiState(
+          val readerState = ReaderUiState(
             book = effectiveBook,
             chapters = parsed.chapters,
             currentChapterIndex = initialIndex,
@@ -133,10 +142,33 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
             bookmarks = stateStore.bookmarksForBook(book.id),
             annotations = stateStore.annotationsForBook(book.id),
           )
+          readerState to parsed.chapters.size
         }
-        .onSuccess { reader ->
+        .onSuccess { (reader, totalChapters) ->
           stateStore.updateLastRead(book.id)
           _uiState.update { it.copy(isLoading = false, readerState = reader, screen = AppScreen.Reader) }
+
+          // Background-load remaining chapters if needed
+          if (totalChapters > initialCount) {
+            launch {
+              val remaining = textExtractor.parseChapterRange(
+                Uri.parse(book.sourceUri), book.id, initialCount until totalChapters
+              )
+              if (remaining.isNotEmpty()) {
+                _uiState.update {
+                  val current = it.readerState ?: return@update it
+                  val mergedChapters = current.chapters.toMutableList()
+                  remaining.forEach { chapter ->
+                    val idx = chapter.index
+                    if (idx in mergedChapters.indices) {
+                      mergedChapters[idx] = chapter
+                    }
+                  }
+                  it.copy(readerState = current.copy(chapters = mergedChapters))
+                }
+              }
+            }
+          }
         }
         .onFailure { throwable ->
           _uiState.update { it.copy(isLoading = false, transientMessage = "打开失败: ${throwable.message ?: "unknown"}") }
@@ -159,10 +191,28 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     _uiState.update {
       it.copy(
         readerState = reader.copy(currentChapterIndex = index, currentParagraphIndex = boundedParagraphIndex),
+        scrollToChapterIndex = index,
       )
     }
     viewModelScope.launch {
       stateStore.saveProgress(reader.book.id, index, boundedParagraphIndex)
+    }
+  }
+
+  fun clearScrollTarget() {
+    _uiState.update { it.copy(scrollToChapterIndex = null) }
+  }
+
+  fun onChapterScrolledTo(chapterIndex: Int) {
+    val reader = _uiState.value.readerState ?: return
+    if (chapterIndex == reader.currentChapterIndex) return
+    if (chapterIndex !in reader.chapters.indices) return
+    _uiState.update {
+      val current = it.readerState ?: return@update it
+      it.copy(readerState = current.copy(currentChapterIndex = chapterIndex))
+    }
+    viewModelScope.launch {
+      stateStore.saveProgress(reader.book.id, chapterIndex, 0)
     }
   }
 
@@ -273,7 +323,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
 
     // 1.6 fix: Check local cache BEFORE API call
     val alreadyTranslated = reader.annotations.any {
-      it.chapterIndex == chapterIndex && it.paragraphIndex == paragraphIndex && it.type == AnnotationType.SENTENCE
+      it.chapterIndex == chapterIndex && it.paragraphIndex == paragraphIndex && it.type == AnnotationType.SENTENCE && it.anchorText == paragraph
     }
     if (alreadyTranslated) {
       _uiState.update { it.copy(transientMessage = "该句已有翻译") }
@@ -474,6 +524,12 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     }
   }
 
+  fun toggleJustify() {
+    viewModelScope.launch {
+      stateStore.updateSettings { settings -> settings.copy(justifyText = !settings.justifyText) }
+    }
+  }
+
   fun deleteBook(bookId: String) {
     viewModelScope.launch {
       stateStore.removeBook(bookId)
@@ -655,4 +711,5 @@ data class MainUiState(
   val readerState: ReaderUiState? = null,
   val transientMessage: String? = null,
   val progressByBook: Map<String, ReadingProgressRecord> = emptyMap(),
+  val scrollToChapterIndex: Int? = null,
 )

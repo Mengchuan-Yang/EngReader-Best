@@ -20,6 +20,22 @@ class BackupZipService(
 ) {
   private val json = Json { ignoreUnknownKeys = true; prettyPrint = true }
 
+  private fun resolveBookFile(sourceUri: String): File? {
+    return runCatching {
+      val uri = Uri.parse(sourceUri)
+      // Uri.fromFile() produces "file:///path" format; path gives the filesystem path
+      val path = uri.path
+      if (!path.isNullOrBlank()) {
+        val file = File(path)
+        if (file.exists()) return file
+      }
+      // Fallback: try booksDir with the filename
+      val name = path?.substringAfterLast('/') ?: return null
+      val fallback = File(booksDir, name)
+      if (fallback.exists()) fallback else null
+    }.getOrNull()
+  }
+
   private val booksDir: File
     get() {
       val dir = File(context.filesDir, "books")
@@ -40,7 +56,7 @@ class BackupZipService(
 
           var count = 0
           snapshot.books.forEach { book ->
-            val sourceFile = File(Uri.parse(book.sourceUri).path ?: return@forEach)
+            val sourceFile = resolveBookFile(book.sourceUri) ?: return@forEach
             if (sourceFile.exists()) {
               zip.putNextEntry(ZipEntry("books/${book.id}.epub"))
               sourceFile.inputStream().use { it.copyTo(zip) }
@@ -95,7 +111,7 @@ class BackupZipService(
 
       // Now safe to delete old books
       stateStore.snapshot().books.forEach { existingBook ->
-        val oldFile = runCatching { File(Uri.parse(existingBook.sourceUri).path!!) }.getOrNull()
+        val oldFile = resolveBookFile(existingBook.sourceUri)
         oldFile?.delete()
       }
 
