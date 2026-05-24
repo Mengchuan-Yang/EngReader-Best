@@ -21,14 +21,36 @@ class EpubImportService(
     withContext(dispatcher) {
       val resolver = context.contentResolver
       val fileName = resolveFileName(inputUri)
+
+      // Pre-check file size
+      val fileSize = resolver.openInputStream(inputUri)?.use { it.available().toLong() } ?: 0L
+      if (fileSize > 500 * 1024 * 1024) { // 500MB limit
+        throw IllegalStateException("File too large (${fileSize / 1024 / 1024}MB). Maximum 500MB.")
+      }
+
       val now = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
       val finalName = ensureEpubExtension("${File(fileName).nameWithoutExtension}_$now")
 
-      // Store in app-private directory (no storage permissions needed, auto-cleaned on uninstall)
       val booksDir = File(context.filesDir, "books")
       if (!booksDir.exists()) booksDir.mkdirs()
       val destFile = File(booksDir, finalName)
 
+      // Validate EPUB magic bytes (ZIP format: PK\x03\x04)
+      var isValidEpub = false
+      resolver.openInputStream(inputUri).use { input ->
+        checkNotNull(input) { "Cannot open source file" }
+        val header = ByteArray(4)
+        val read = input.read(header)
+        if (read == 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()) {
+          isValidEpub = true
+        }
+      }
+
+      if (!isValidEpub) {
+        throw IllegalStateException("Not a valid EPUB file (missing ZIP header)")
+      }
+
+      // Now actually copy the file
       resolver.openInputStream(inputUri).use { input ->
         checkNotNull(input) { "Cannot open source file" }
         destFile.outputStream().use { output ->

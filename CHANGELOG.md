@@ -4,6 +4,30 @@ All notable changes to EngReader Best.
 
 ---
 
+## [1.0.1] — 2026-05-24
+
+### 管道完整性修复
+
+对 EPUB 从文件到屏幕的 7 层渲染管道进行全面审计和加固。
+
+### 新增
+- **预渲染机制**：导入 EPUB 后后台解析全部章节，书架卡片显示进度条。5 分钟超时防止无限渲染。存量书籍不受影响。
+- **文件完整性校验**：导入前检查文件大小（>500MB 拒绝）+ ZIP magic bytes 验证
+- **OPF manifest 全量访问**：通过 Java 反射访问 epub4j `Book.resources` 私有字段，图片不再仅限 spine 中声明的资源
+- **HTML 结构渲染**：标题（dp 阈值检测 + Bold）、链接（蓝色下划线 + 可点击打开浏览器）、块引用（fillMaxHeight 竖条 + 斜体）、列表（• / 1. 2. 3. 前缀）、表格（│ 分隔文本）
+- **HTML 样式渲染**：粗体、斜体、下划线、删除线、上下标、等宽字体、前景色完整保留
+
+### 修复
+- TOC 章节标题匹配回归 bug（`parseChapterContent` 丢失 `resourceHref`）
+- `sanitizeHtmlStyledParagraphs` 重复行匹配错误（`indexOf` → `\n` 位置扫描法）
+- 图片路径覆盖不足（3 种 → 10 种 fallback + suffix 通配）
+- Blockquote 竖条高度固定不伸展（`height(24.dp)` → `fillMaxHeight() + IntrinsicSize.Min`）
+- `AbsoluteSizeSpan` 阈值不适用多密度设备（px → dp 转换）
+- 翻译标注颜色灰不可读（`#9CA3AF` → `#E53935` 红色）
+- 句子去重粒度太粗（段落级 → 句子文本级 `anchorText` 匹配）
+
+---
+
 ## [1.0.0] — 2026-05-24
 
 ### 1.0 正式发布

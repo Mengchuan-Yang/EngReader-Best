@@ -96,6 +96,15 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
               stateStore.updateBookMetadata(book.id, coverPath = coverPath)
             }
           }
+          // Pre-render all chapters in background with progress
+          launch {
+            runCatching {
+              textExtractor.preRenderAll(result.copiedUri, book.id) { progress ->
+                stateStore.updateBookPreRender(book.id, progress)
+                _uiState.update { it.copy(books = sortBooks(stateStore.snapshot().books, it.settings.shelfSortMode)) }
+              }
+            }
+          }
         }
         .onSuccess {
           _uiState.update { it.copy(isLoading = false, transientMessage = appContext.getString(R.string.msg_import_success)) }
@@ -111,6 +120,10 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   }
 
   fun openBook(book: BookRecord) {
+    if (book.preRenderProgress > 0f && book.preRenderProgress < 1f) {
+      _uiState.update { it.copy(transientMessage = "请等待预渲染完成") }
+      return
+    }
     viewModelScope.launch {
       _uiState.update { it.copy(isLoading = true, transientMessage = null) }
       val initialCount = 5
@@ -146,6 +159,10 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
         }
         .onSuccess { (reader, totalChapters) ->
           stateStore.updateLastRead(book.id)
+          // Mark as pre-rendered for existing books
+          if (book.preRenderProgress < 1f) {
+            stateStore.updateBookPreRender(book.id, 1f)
+          }
           _uiState.update { it.copy(isLoading = false, readerState = reader, screen = AppScreen.Reader) }
 
           // Background-load remaining chapters if needed

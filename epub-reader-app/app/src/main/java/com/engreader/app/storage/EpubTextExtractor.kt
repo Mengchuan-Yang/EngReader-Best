@@ -4,11 +4,20 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
+import android.graphics.Typeface
 import android.text.Spanned
+import android.text.style.AbsoluteSizeSpan
+import android.text.style.BulletSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.LeadingMarginSpan
+import android.text.style.QuoteSpan
+import android.text.style.RelativeSizeSpan
 import android.text.style.StrikethroughSpan
 import android.text.style.StyleSpan
 import android.text.style.SubscriptSpan
 import android.text.style.SuperscriptSpan
+import android.text.style.TypefaceSpan
+import android.text.style.URLSpan
 import android.text.style.UnderlineSpan
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -24,6 +33,7 @@ import io.documentnode.epub4j.domain.Resource
 import io.documentnode.epub4j.domain.TOCReference
 import io.documentnode.epub4j.epub.EpubReader
 import java.io.File
+import java.lang.reflect.Field
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
@@ -115,7 +125,7 @@ class EpubTextExtractor(
 
           // Store raw HTML for later parsing, but only parse chapters in range
           if (chapterIndex in startChapter until (startChapter + maxChapters)) {
-            val chapter = parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex)
+            val chapter = parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex, resource.href.orEmpty())
             allChapters += chapter
           } else {
             // Add placeholder for chapters outside range
@@ -159,6 +169,53 @@ class EpubTextExtractor(
       }
     }
 
+  suspend fun preRenderAll(
+    uri: Uri,
+    bookId: String,
+    onProgress: (Float) -> Unit,
+  ): ParsedBook =
+    withContext(dispatcher) {
+      context.contentResolver.openInputStream(uri).use { stream ->
+        checkNotNull(stream) { "Cannot open EPUB file" }
+        val book = EpubReader().readEpub(stream)
+        val tocTitleMap = buildTocTitleMap(book.tableOfContents.tocReferences)
+        val imageMap = extractImages(book, bookId)
+
+        val chapters = mutableListOf<ChapterContent>()
+        var chapterIndex = 0
+        val totalChapters = book.spine.spineReferences.count { ref ->
+          ref.resource != null && isHtmlResource(ref.resource!!)
+        }.coerceAtLeast(1)
+
+        val startTime = System.currentTimeMillis()
+        val maxDurationMs = 5 * 60 * 1000L
+
+        for (spineRef in book.spine.spineReferences) {
+          if (System.currentTimeMillis() - startTime > maxDurationMs) break
+          val resource = spineRef.resource ?: continue
+          if (!isHtmlResource(resource)) continue
+
+          val rawHtml = runCatching { resource.reader.readText() }.getOrDefault("")
+          if (rawHtml.isBlank()) { chapterIndex++; continue }
+
+          chapters += parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex, resource.href.orEmpty())
+          chapterIndex++
+          onProgress(chapterIndex.toFloat() / totalChapters)
+        }
+
+        onProgress(1f)
+        val metadataTitle = sanitizeMetadataText(book.metadata.firstTitle)
+        val metadataAuthor = book.metadata.authors.firstOrNull()?.let { "${it.firstname} ${it.lastname}" }?.trim().orEmpty()
+        ParsedBook(
+          bookTitle = metadataTitle.takeIf { it.isNotBlank() && !looksLikeHashOrId(it) },
+          author = metadataAuthor.takeIf { it.isNotBlank() },
+          chapters = chapters.ifEmpty {
+            listOf(ChapterContent(index = 0, title = "Chapter 1", paragraphs = listOf("No readable chapter found.")))
+          },
+        )
+      }
+    }
+
   suspend fun parseChapterRange(uri: Uri, bookId: String = "", indices: IntRange): List<ChapterContent> =
     withContext(dispatcher) {
       context.contentResolver.openInputStream(uri).use { stream ->
@@ -177,7 +234,7 @@ class EpubTextExtractor(
           if (chapterIndex in indices) {
             val rawHtml = runCatching { resource.reader.readText() }.getOrDefault("")
             if (rawHtml.isNotBlank()) {
-              results += parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex)
+              results += parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex, resource.href.orEmpty())
             }
           }
           chapterIndex += 1
@@ -191,6 +248,7 @@ class EpubTextExtractor(
     imageMap: Map<String, String>,
     tocTitleMap: Map<String, String>,
     chapterIndex: Int,
+    resourceHref: String = "",
   ): ChapterContent {
     val htmlWithMarkers = replaceImgTags(rawHtml, imageMap)
     val text = sanitizeHtml(htmlWithMarkers)
@@ -198,7 +256,7 @@ class EpubTextExtractor(
     val styledParagraphs = sanitizeHtmlStyledParagraphs(htmlWithMarkers)
     val segments = paragraphs.map { paragraphToSegments(it) }
 
-    val tocTitle = tocTitleMap[normalizeHref("")]
+    val tocTitle = tocTitleMap[normalizeHref(resourceHref)]
     val headingTitle = extractHeadingFromHtml(rawHtml)
     val firstParagraphTitle = paragraphs.firstOrNull()?.take(48).orEmpty()
     val bestTitle = pickBestTitle(
@@ -247,6 +305,20 @@ class EpubTextExtractor(
       spineRef.resource?.let { processResource(it) }
     }
 
+    // Try to access OPF manifest resources via reflection
+    runCatching {
+      val resourcesField: Field = book.javaClass.getDeclaredField("resources")
+      resourcesField.isAccessible = true
+      val resourcesObj = resourcesField.get(book)
+      if (resourcesObj != null) {
+        val getResourcesMethod = resourcesObj.javaClass.getDeclaredMethod("getResources")
+        val allResources = getResourcesMethod.invoke(resourcesObj) as? Map<*, *>
+        allResources?.values?.forEach { res ->
+          if (res is Resource) processResource(res)
+        }
+      }
+    }
+
     // Also check cover image
     book.coverImage?.let { processResource(it) }
 
@@ -259,13 +331,24 @@ class EpubTextExtractor(
     return imgRegex.replace(raw) { match ->
       val src = match.groupValues[1]
       val normalized = normalizeHref(src)
-      val localPath = imageMap[src] ?: imageMap[normalized] ?: imageMap[src.substringAfterLast('/')]
+      val simpleName = src.substringAfterLast('/')
+      // Try many path variants
+      val localPath = imageMap[src]
+        ?: imageMap[normalized]
+        ?: imageMap[simpleName]
+        ?: imageMap["../Images/$simpleName"]
+        ?: imageMap["images/$simpleName"]
+        ?: imageMap["Images/$simpleName"]
+        ?: imageMap["image/$simpleName"]
+        ?: imageMap["Image/$simpleName"]
+        ?: imageMap["OEBPS/$simpleName"]
+        ?: imageMap["OPS/$simpleName"]
+        ?: imageMap.entries.firstOrNull { it.key.endsWith(simpleName) }?.value
       if (localPath != null) {
         val altMatch = Regex("alt=[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE).find(match.value)
         val alt = altMatch?.groupValues?.getOrNull(1)?.replace("|", "") ?: ""
         "[[IMG:$localPath|$alt]]"
       } else {
-        // Image not found in resources, strip the tag
         ""
       }
     }
@@ -348,10 +431,9 @@ class EpubTextExtractor(
     raw.orEmpty().replace(' ', ' ').replace(Regex("\\s+"), " ").trim()
 
   private fun sanitizeHtml(raw: String): String {
-    val noScript = raw.replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), "")
+    val preprocessed = preprocessHtml(raw)
+    val noScript = preprocessed.replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), "")
     val noStyle = noScript.replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
-    // 4.2: Use Spanned to preserve basic HTML styling, but extract text for paragraph storage
-    // Full AnnotatedString conversion is deferred to rendering layer
     val spanned = HtmlCompat.fromHtml(noStyle, HtmlCompat.FROM_HTML_MODE_LEGACY)
     return spanned.toString()
       .replace(" ", " ")
@@ -360,7 +442,8 @@ class EpubTextExtractor(
   }
 
   private fun sanitizeHtmlStyledParagraphs(raw: String): List<AnnotatedString> {
-    val noScript = raw.replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), "")
+    val preprocessed = preprocessHtml(raw)
+    val noScript = preprocessed.replace(Regex("<script[\\s\\S]*?</script>", RegexOption.IGNORE_CASE), "")
     val noStyle = noScript.replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
     val spanned = HtmlCompat.fromHtml(noStyle, HtmlCompat.FROM_HTML_MODE_LEGACY)
     val fullText = spanned.toString()
@@ -368,26 +451,28 @@ class EpubTextExtractor(
       .replace(Regex("\\n{3,}"), "\n\n")
       .trim()
 
-    val lines = fullText.split("\n").map { it.trim() }.filter { it.isNotBlank() }
-    if (lines.isEmpty()) return emptyList()
+    // Robust: find all \n positions to split accurately, never by substring search
+    val lineStarts = mutableListOf(0)
+    for (i in fullText.indices) {
+      if (fullText[i] == '\n') lineStarts.add(i + 1)
+    }
+    lineStarts.add(fullText.length)
 
     val result = mutableListOf<AnnotatedString>()
-    var searchFrom = 0
-    for (line in lines) {
-      val lineStart = fullText.indexOf(line, searchFrom)
-      if (lineStart < 0) {
-        result.add(AnnotatedString(line))
-        continue
+    for (i in 0 until lineStarts.size - 1) {
+      val lineText = fullText.substring(lineStarts[i], lineStarts[i + 1]).trim()
+      if (lineText.isNotBlank()) {
+        result.add(buildStyledLine(spanned, lineText, lineStarts[i], lineStarts[i + 1]))
       }
-      val lineEnd = lineStart + line.length
-      result.add(buildStyledLine(spanned, line, lineStart, lineEnd))
-      searchFrom = lineEnd
     }
     return result
   }
 
   private fun buildStyledLine(spanned: Spanned, lineText: String, lineStart: Int, lineEnd: Int): AnnotatedString {
     val builder = AnnotatedString.Builder(lineText)
+    // Track heading level: if the line is wrapped in a heading span, record it
+    var headingLevel = 0 // 0=body, 1=h1, 2=h2, ...
+
     spanned.getSpans(lineStart, lineEnd, Any::class.java).forEach { span ->
       val spanStart = (spanned.getSpanStart(span) - lineStart).coerceIn(0, lineText.length)
       val spanEnd = (spanned.getSpanEnd(span) - lineStart).coerceIn(0, lineText.length)
@@ -395,17 +480,59 @@ class EpubTextExtractor(
 
       when (span) {
         is StyleSpan -> {
-          val fontWeight = if (span.style == android.graphics.Typeface.BOLD) FontWeight.Bold else FontWeight.Normal
-          val fontStyle = if (span.style == android.graphics.Typeface.ITALIC) FontStyle.Italic else FontStyle.Normal
+          val fontWeight = if (span.style == Typeface.BOLD) FontWeight.Bold else FontWeight.Normal
+          val fontStyle = if (span.style == Typeface.ITALIC) FontStyle.Italic else FontStyle.Normal
           builder.addStyle(SpanStyle(fontWeight = fontWeight, fontStyle = fontStyle), spanStart, spanEnd)
         }
         is UnderlineSpan -> builder.addStyle(SpanStyle(textDecoration = TextDecoration.Underline), spanStart, spanEnd)
         is StrikethroughSpan -> builder.addStyle(SpanStyle(textDecoration = TextDecoration.LineThrough), spanStart, spanEnd)
         is SuperscriptSpan -> builder.addStyle(SpanStyle(baselineShift = BaselineShift.Superscript), spanStart, spanEnd)
         is SubscriptSpan -> builder.addStyle(SpanStyle(baselineShift = BaselineShift.Subscript), spanStart, spanEnd)
+        is ForegroundColorSpan -> builder.addStyle(SpanStyle(color = androidx.compose.ui.graphics.Color(span.foregroundColor)), spanStart, spanEnd)
+        is AbsoluteSizeSpan -> {
+          // Convert px to dp for device-independent heading detection
+          val density = context.resources.displayMetrics.density
+          val sizeDp = span.size / density
+          if (sizeDp >= 20f) {
+            headingLevel = 2
+          } else if (sizeDp >= 16f) {
+            headingLevel = if (headingLevel == 0) 3 else headingLevel
+          }
+        }
+        is RelativeSizeSpan -> {
+          val scale = span.sizeChange
+          if (scale > 1.3f) headingLevel = maxOf(headingLevel, 2)
+          else if (scale > 1.1f) headingLevel = maxOf(headingLevel, 3)
+        }
+        is URLSpan -> {
+          builder.addStyle(SpanStyle(textDecoration = TextDecoration.Underline, color = androidx.compose.ui.graphics.Color(0xFF1565C0)), spanStart, spanEnd)
+          builder.addStringAnnotation(tag = "URL", annotation = span.url, start = spanStart, end = spanEnd)
+        }
+        is TypefaceSpan -> {
+          val family = span.family?.lowercase(Locale.US) ?: ""
+          if (family.contains("monospace") || family.contains("courier") || family.contains("mono")) {
+            builder.addStyle(SpanStyle(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace), spanStart, spanEnd)
+          }
+        }
+        is LeadingMarginSpan -> {
+          // Blockquote or list item
+        }
+        is QuoteSpan -> {
+          builder.addStringAnnotation("BLOCKQUOTE", "1", spanStart, spanEnd)
+        }
+        is BulletSpan -> {
+          // List item bullet — already handled by preprocessor, but mark it
+        }
       }
     }
-    return builder.toAnnotatedString()
+
+    val result = builder.toAnnotatedString()
+    // Store heading level so rendering layer can adjust font size
+    return if (headingLevel > 0) {
+      AnnotatedString.Builder(result).apply {
+        addStringAnnotation("HEADING", headingLevel.toString(), 0, result.text.length)
+      }.toAnnotatedString()
+    } else result
   }
 
   private fun isHtmlResource(resource: Resource): Boolean {
@@ -418,6 +545,76 @@ class EpubTextExtractor(
     val noFragment = rawHref.substringBefore('#').trim().trimStart('/')
     val decoded = runCatching { URLDecoder.decode(noFragment, StandardCharsets.UTF_8.name()) }.getOrDefault(noFragment)
     return decoded.removePrefix("./").lowercase(Locale.US)
+  }
+
+  private fun preprocessHtml(raw: String): String {
+    var html = raw
+    // 1. Convert <table> blocks to indented text representation
+    html = html.replace(Regex("<table[^>]*>[\\s\\S]*?</table>", RegexOption.IGNORE_CASE)) { match ->
+      tableToText(match.value)
+    }
+    // 2. Add bullet prefix for <ul> list items
+    html = html.replace(Regex("<ul[^>]*>[\\s\\S]*?</ul>", RegexOption.IGNORE_CASE)) { match ->
+      match.value.replace(Regex("<li[^>]*>", RegexOption.IGNORE_CASE), "<li>• ")
+    }
+    // 3. Add numbered prefix for <ol> list items
+    var olCounter = 0
+    html = html.replace(Regex("<ol[^>]*>[\\s\\S]*?</ol>", RegexOption.IGNORE_CASE)) { match ->
+      olCounter = 0
+      match.value.replace(Regex("<li[^>]*>", RegexOption.IGNORE_CASE)) {
+        olCounter++
+        "<li>$olCounter. "
+      }
+    }
+    return html
+  }
+
+  private fun extractCssImages(raw: String, imageMap: MutableMap<String, String>) {
+    // Scan inline <style> blocks for background-image URLs
+    val cssUrlRegex = Regex("""background-image\s*:\s*url\s*\(\s*["']?([^)"'\s]+)["']?\s*\)""", RegexOption.IGNORE_CASE)
+    val styleBlocks = Regex("<style[^>]*>[\\s\\S]*?</style>", RegexOption.IGNORE_CASE).findAll(raw)
+    val bookId = "css" // We don't have bookId here; images are already extracted by extractImages
+    for (block in styleBlocks) {
+      cssUrlRegex.findAll(block.value).forEach { match ->
+        val url = match.groupValues[1]
+        // Try to find this URL in the image map or nearby paths
+        imageMap.computeIfAbsent(url) { url }
+        val simpleName = url.substringAfterLast('/')
+        imageMap.computeIfAbsent(simpleName) { simpleName }
+      }
+    }
+  }
+
+  private fun tableToText(tableHtml: String): String {
+    val sb = StringBuilder()
+    sb.append("\n")
+    val rows = Regex("<tr[^>]*>[\\s\\S]*?</tr>", RegexOption.IGNORE_CASE).findAll(tableHtml).toList()
+    if (rows.isEmpty()) return "\n[Table]\n"
+    for (row in rows) {
+      val cells = Regex("<t[hd][^>]*>[\\s\\S]*?</t[hd]>", RegexOption.IGNORE_CASE).findAll(row.value).toList()
+      val cellTexts = cells.map { cell ->
+        // Extract text preserving inline tags like <b>, <i>, <a>
+        val inner = cell.value
+          .replace(Regex("</?t[hd][^>]*>", RegexOption.IGNORE_CASE), "")
+          .replace(Regex("<[^>]+>")) { match ->
+            val tag = match.value.lowercase(Locale.US)
+            when {
+              tag.contains("</b>") || tag.contains("</strong>") -> ""
+              tag.contains("</i>") || tag.contains("</em>") -> ""
+              tag.contains("</a>") -> ""
+              tag.contains("<br") -> " "
+              else -> ""
+            }
+          }
+          .trim().take(40)
+ inner
+      }
+      if (cellTexts.isNotEmpty()) {
+        sb.append("  ${cellTexts.joinToString(" │ ")}\n")
+      }
+    }
+    sb.append("\n")
+    return sb.toString()
   }
 
   private fun looksLikeHashOrId(text: String): Boolean {

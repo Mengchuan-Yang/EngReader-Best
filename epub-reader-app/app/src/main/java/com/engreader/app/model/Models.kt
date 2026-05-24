@@ -17,6 +17,7 @@ data class BookRecord(
   val lastReadAt: Long,
   val totalChapters: Int = 0,
   val coverPath: String = "",
+  val preRenderProgress: Float = 0f, // 0=not started, 1=complete
 )
 
 @Serializable

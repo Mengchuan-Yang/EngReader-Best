@@ -1,5 +1,6 @@
 package com.engreader.app.ui.main
 
+import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.BackHandler
@@ -17,6 +18,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -26,6 +28,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -56,6 +59,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -82,6 +86,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.Hyphens
@@ -467,6 +472,18 @@ private fun ShelfContent(
                 Text(book.title, fontWeight = FontWeight.SemiBold, maxLines = 2)
                 Spacer(Modifier.height(4.dp))
                 Text(progressLabel(book, progressByBook[book.id]), style = MaterialTheme.typography.bodySmall)
+                if (book.preRenderProgress < 1f && book.preRenderProgress > 0f) {
+                  Spacer(Modifier.height(4.dp))
+                  LinearProgressIndicator(
+                    progress = { book.preRenderProgress },
+                    modifier = Modifier.fillMaxWidth(),
+                  )
+                  Text(
+                    "${(book.preRenderProgress * 100).toInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary,
+                  )
+                }
                 Spacer(Modifier.height(4.dp))
                 TextButton(onClick = { onDeleteBook(book.id) }) { Text(stringResource(R.string.action_delete)) }
               }
@@ -1062,17 +1079,76 @@ private fun ParagraphWithGestures(
   var textLayoutResult by remember { mutableStateOf<TextLayoutResult?>(null) }
   var pressPixelOffset by remember { mutableStateOf(Offset.Zero) }
 
-  BasicText(
-    text = displayText,
-    style = TextStyle(
-      fontFamily = FontFamily.Serif,
-      fontSize = fontSize,
-      lineHeight = lineHeight,
-      textAlign = textAlign,
-      textIndent = TextIndent(firstLine = 22.sp),
-      color = contentColor,
-      hyphens = if (textAlign == TextAlign.Justify) Hyphens.Auto else Hyphens.Unspecified,
-    ),
+  // Detect heading
+  val headingAnnotations = displayText.getStringAnnotations("HEADING", 0, displayText.text.length)
+  val isHeading = headingAnnotations.isNotEmpty()
+  // Detect blockquote
+  val blockquoteAnnotations = displayText.getStringAnnotations("BLOCKQUOTE", 0, displayText.text.length)
+  val isBlockquote = blockquoteAnnotations.isNotEmpty()
+  val context = LocalView.current.context
+
+  val textStyle = TextStyle(
+    fontFamily = FontFamily.Serif,
+    fontSize = if (isHeading) (22f * settings.fontScale).sp else fontSize,
+    lineHeight = lineHeight,
+    fontWeight = if (isHeading) FontWeight.Bold else FontWeight.Normal,
+    textAlign = textAlign,
+    textIndent = if (isHeading) TextIndent() else TextIndent(firstLine = 22.sp),
+    color = contentColor,
+    hyphens = if (textAlign == TextAlign.Justify) Hyphens.Auto else Hyphens.Unspecified,
+  )
+
+  // Blockquote: wrap with left bar
+  if (isBlockquote) {
+    Row(modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min)) {
+      Box(
+        modifier = Modifier
+          .width(4.dp)
+          .fillMaxHeight()
+          .background(contentColor.copy(alpha = 0.3f), RoundedCornerShape(2.dp))
+      )
+      Spacer(Modifier.width(8.dp))
+      BasicText(
+        text = displayText,
+        style = textStyle.copy(color = contentColor.copy(alpha = 0.85f), fontStyle = FontStyle.Italic),
+        onTextLayout = { textLayoutResult = it },
+        modifier = Modifier
+          .weight(1f)
+          .pointerInput(displayText) {
+            detectTapGestures(
+              onPress = { offset -> pressPixelOffset = offset; tryAwaitRelease() },
+              onTap = {
+                val layout = textLayoutResult ?: return@detectTapGestures
+                val charOffset = layout.getOffsetForPosition(pressPixelOffset)
+                onParagraphChange()
+                val urlAnnotations = displayText.getStringAnnotations("URL", charOffset, charOffset)
+                if (urlAnnotations.isNotEmpty()) {
+                  val intent = Intent(Intent.ACTION_VIEW, Uri.parse(urlAnnotations.first().item))
+                  runCatching { context.startActivity(intent) }
+                  return@detectTapGestures
+                }
+                val mappedOffset = mapRenderedOffsetToOriginal(originalText, paragraphAnnotations, settings.showAnnotations, charOffset)
+                if (mappedOffset >= 0 && originalText.getOrNull(mappedOffset)?.isLetter() == true) {
+                  onWordTap(mappedOffset)
+                } else {
+                  onToggleChrome()
+                }
+              },
+              onLongPress = { offset ->
+                val layout = textLayoutResult ?: return@detectTapGestures
+                val charOffset = layout.getOffsetForPosition(offset)
+                onParagraphChange()
+                val mappedOffset = mapRenderedOffsetToOriginal(originalText, paragraphAnnotations, settings.showAnnotations, charOffset)
+                if (mappedOffset >= 0) { onSentenceLongPress(mappedOffset) }
+              },
+            )
+          },
+      )
+    }
+  } else {
+    BasicText(
+      text = displayText,
+    style = textStyle,
     onTextLayout = { textLayoutResult = it },
     modifier = Modifier
       .fillMaxWidth()
@@ -1086,6 +1162,14 @@ private fun ParagraphWithGestures(
             val layout = textLayoutResult ?: return@detectTapGestures
             val charOffset = layout.getOffsetForPosition(pressPixelOffset)
             onParagraphChange()
+            // Check for URL link first
+            val urlAnnotations = displayText.getStringAnnotations("URL", charOffset, charOffset)
+            if (urlAnnotations.isNotEmpty()) {
+              val url = urlAnnotations.first().item
+              val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+              runCatching { context.startActivity(intent) }
+              return@detectTapGestures
+            }
             val mappedOffset =
               mapRenderedOffsetToOriginal(originalText, paragraphAnnotations, settings.showAnnotations, charOffset)
             if (mappedOffset >= 0 && originalText.getOrNull(mappedOffset)?.isLetter() == true) {
@@ -1106,7 +1190,8 @@ private fun ParagraphWithGestures(
           },
         )
       },
-  )
+    )
+  }
 }
 
 private fun mapRenderedOffsetToOriginal(

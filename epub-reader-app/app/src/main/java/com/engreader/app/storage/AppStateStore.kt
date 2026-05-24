@@ -70,6 +70,14 @@ class AppStateStore(
       persist(_state.value.copy(books = nextBooks))
     }
 
+  fun updateBookPreRender(bookId: String, progress: Float) {
+    val nextBooks = _state.value.books.map { book ->
+      if (book.id != bookId) book else book.copy(preRenderProgress = progress)
+    }
+    _state.value = _state.value.copy(books = nextBooks)
+    stateFile.writeText(json.encodeToString(PersistedState.serializer(), _state.value))
+  }
+
   suspend fun removeBook(bookId: String) =
     withContext(dispatcher) {
       val nextState =
