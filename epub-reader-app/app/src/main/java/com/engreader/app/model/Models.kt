@@ -124,4 +124,5 @@ data class ParsedBook(
   val bookTitle: String? = null,
   val author: String? = null,
   val chapters: List<ChapterContent>,
+  val totalChapters: Int = chapters.size,
 )

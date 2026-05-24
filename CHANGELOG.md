@@ -4,6 +4,49 @@ All notable changes to EngReader Best.
 
 ---
 
+## [1.0.2] — 2026-05-24
+
+### 数据链路完整性修复（P0）
+
+基于 EPUB 二次审计报告的全量修复。
+
+**章节索引与懒加载**
+- 修复 `parseBook()` 章节 index 双重递增 bug（每项 spine item 递增加上末尾 `chapterIndex += 1`）
+- 新增 `ParsedBook.totalChapters` 字段传递 spine 真实章节总数
+- ViewModel `openBook()` 改为固定长度 placeholder 列表，后台加载按 index 正确合并
+- 空章节生成占位 `ChapterContent`，不再导致索引缺项
+
+**container.xml 解析**
+- `EpubStructureInspector.checkContainer()` 正则→XML Pull Parser 重写
+- 新增 `Rootfile` 数据结构，按 `media-type` 正确选择 OPF
+- 路径 URL decode + 规范化
+
+**OPF manifest/spine 显式解析**
+- 新增 `OpfInfo`、`ManifestItem`、`SpineItemRef` 数据结构
+- 新增 `readOpfInfo()` 方法，XML 解析 metadata/manifest/spine
+- metadata fallback 从 ZipFile 真实 OPF path 读取，不再依赖 spine 中的错误路径
+
+**编码修复**
+- GB2312/GBK/GB18030 改为 `Charset.forName("GB18030")` 真实解码
+- 新增 `decodeStrict()` 严格 UTF-8 检测（`CodingErrorAction.REPORT`）
+- 解码链：BOM→XML encoding→meta charset→strict declared→strict UTF-8→GB18030→ISO-8859-1
+- `readMetadataSafe()` 接入 OPF bytes 解码 fallback
+
+**图片/CSS 路径解析**
+- 新增 `resolveEpubHref(opfBaseDir, currentResourceHref, relativeHref)` 归一化路径解析
+- `replaceImgTags()` 接入 resourceHref + opfBaseDir，路径解析不再靠 simpleName 猜测
+- `extractCssImages()` 接入解析链路
+
+**渲染层**
+- PAGED 模式用 `HorizontalPager` 独立实现（章节级翻页）
+- 内部链接 vs 外部链接区分
+- SVG/图片失败有文本占位
+- 段首缩进全部移除
+
+---
+
+## [1.0.1] — 2026-05-24
+
 ## [1.0.1] — 2026-05-24
 
 ### 管道完整性修复

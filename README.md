@@ -1,6 +1,6 @@
 # EngReader Best
 
-> Android EPUB 英文原版书阅读器 — 集成多 AI 翻译引擎 | v1.0.1
+> Android EPUB 英文原版书阅读器 — 集成多 AI 翻译引擎 | v1.0.2
 
 [![Release](https://img.shields.io/github/v/release/Mengchuan-Yang/EngReader-Best?label=latest)](https://github.com/Mengchuan-Yang/EngReader-Best/releases)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)

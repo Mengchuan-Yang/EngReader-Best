@@ -36,7 +36,11 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.ClickableText
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -601,6 +605,70 @@ private fun ReaderContent(
 
     val paragraphSpacingDp = (14 * settings.paragraphSpacingScale).dp
     val horizontalMarginDp = (12 * settings.marginScale).dp
+
+    if (settings.readerMode == ReaderMode.PAGED) {
+      // PAGED mode: one chapter per page with scrollable content
+      val pagerState = rememberPagerState(
+        initialPage = state.currentChapterIndex.coerceIn(0, (state.chapters.size - 1).coerceAtLeast(0)),
+        pageCount = { state.chapters.size.coerceAtLeast(1) }
+      )
+      LaunchedEffect(pagerState.currentPage) {
+        val newPage = pagerState.currentPage
+        if (newPage != state.currentChapterIndex) {
+          onChapterChange(newPage)
+        }
+      }
+      HorizontalPager(state = pagerState, modifier = Modifier.weight(1f)) { page ->
+        val chapter = state.chapters.getOrNull(page)
+        if (chapter != null && chapter.paragraphs.isNotEmpty()) {
+          val columnState = rememberScrollState()
+          Column(
+            modifier = Modifier
+              .fillMaxSize()
+              .verticalScroll(columnState)
+              .padding(horizontal = horizontalMarginDp),
+            verticalArrangement = Arrangement.spacedBy(paragraphSpacingDp),
+          ) {
+            for (i in chapter.paragraphs.indices) {
+              val paragraphAnnotations = state.annotations.filter {
+                it.chapterIndex == chapter.index && it.paragraphIndex == i
+              }
+              val styled = chapter.styledParagraphs.getOrNull(i)
+              val displayText = if (styled != null) {
+                renderAnnotatedWithAnnotations(styled, paragraphAnnotations, settings.showAnnotations)
+              } else {
+                renderParagraphWithAnnotations(chapter.paragraphs[i], paragraphAnnotations, settings.showAnnotations)
+              }
+              val textAlign = if (justifyText) TextAlign.Justify else TextAlign.Left
+              Box(modifier = Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Column(modifier = Modifier.fillMaxWidth().widthIn(max = 760.dp)) {
+                  ParagraphWithGestures(
+                    displayText = displayText,
+                    originalText = chapter.paragraphs[i],
+                    textAlign = textAlign,
+                    fontSize = (18f * settings.fontScale).sp,
+                    lineHeight = (30f * settings.lineHeightScale).sp,
+                    contentColor = contentColor,
+                    paragraphAnnotations = paragraphAnnotations,
+                    settings = settings,
+                    onParagraphChange = { onParagraphChange(i) },
+                    onWordTap = { mappedOffset ->
+                      onWordTap(chapter.index, i, chapter.paragraphs[i], mappedOffset)
+                    },
+                    onSentenceLongPress = { mappedOffset ->
+                      val sentence = extractSentenceAtOffset(chapter.paragraphs[i], mappedOffset)
+                      onSentenceLongPress(chapter.index, i, sentence)
+                    },
+                    onToggleChrome = onToggleChrome,
+                  )
+                }
+              }
+            }
+          }
+        }
+      }
+    } else {
+      // VERTICAL mode: use existing LazyColumn
     LazyColumn(
       state = listState,
       modifier = Modifier.weight(1f).padding(horizontal = horizontalMarginDp),
@@ -671,16 +739,34 @@ private fun ReaderContent(
                       }
 
                       is ParagraphSegment.ImageSegment -> {
-                        val bitmap = runCatching { BitmapFactory.decodeFile(segment.imagePath) }.getOrNull()
-                        if (bitmap != null) {
-                          Image(
-                            bitmap = bitmap.asImageBitmap(),
-                            contentDescription = segment.altText.ifBlank { "image" },
-                            modifier = Modifier
-                              .fillMaxWidth()
-                              .padding(vertical = 8.dp)
-                              .clip(RoundedCornerShape(8.dp)),
+                        val isSvg = segment.imagePath.lowercase().endsWith(".svg")
+                        if (isSvg) {
+                          // SVG not natively supported; show placeholder
+                          Text(
+                            text = "[SVG: ${segment.altText.ifBlank { "image" }}]",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = contentColor.copy(alpha = 0.4f),
+                            modifier = Modifier.padding(vertical = 4.dp),
                           )
+                        } else {
+                          val bitmap = runCatching { BitmapFactory.decodeFile(segment.imagePath) }.getOrNull()
+                          if (bitmap != null) {
+                            Image(
+                              bitmap = bitmap.asImageBitmap(),
+                              contentDescription = segment.altText.ifBlank { "image" },
+                              modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 8.dp)
+                                .clip(RoundedCornerShape(8.dp)),
+                            )
+                          } else {
+                            Text(
+                              text = "[Image: ${segment.altText.ifBlank { "unknown" }}]",
+                              style = MaterialTheme.typography.labelSmall,
+                              color = contentColor.copy(alpha = 0.4f),
+                              modifier = Modifier.padding(vertical = 4.dp),
+                            )
+                          }
                         }
                       }
                     }
@@ -737,6 +823,7 @@ private fun ReaderContent(
         }
       }
     }
+    } // end else (VERTICAL mode)
 
     if (chromeVisible) {
       HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
@@ -1093,7 +1180,7 @@ private fun ParagraphWithGestures(
     lineHeight = lineHeight,
     fontWeight = if (isHeading) FontWeight.Bold else FontWeight.Normal,
     textAlign = textAlign,
-    textIndent = if (isHeading) TextIndent() else TextIndent(firstLine = 22.sp),
+    textIndent = TextIndent(),
     color = contentColor,
     hyphens = if (textAlign == TextAlign.Justify) Hyphens.Auto else Hyphens.Unspecified,
   )

@@ -19,6 +19,7 @@ import android.text.style.SuperscriptSpan
 import android.text.style.TypefaceSpan
 import android.text.style.URLSpan
 import android.text.style.UnderlineSpan
+import android.util.Log
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.font.FontStyle
@@ -34,6 +35,10 @@ import io.documentnode.epub4j.domain.TOCReference
 import io.documentnode.epub4j.epub.EpubReader
 import java.io.File
 import java.lang.reflect.Field
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
+import java.nio.charset.Charset
+import java.nio.charset.CodingErrorAction
 import java.net.URLDecoder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
@@ -95,12 +100,8 @@ class EpubTextExtractor(
       context.contentResolver.openInputStream(uri).use { stream ->
         checkNotNull(stream) { "Cannot open EPUB file" }
         val book = EpubReader().readEpub(stream)
-        val title = sanitizeMetadataText(book.metadata.firstTitle)
-        val author = book.metadata.authors.firstOrNull()?.let { "${it.firstname} ${it.lastname}" }?.trim().orEmpty()
-        EpubMetadata(
-          title = title.takeIf { it.isNotBlank() && !looksLikeHashOrId(it) },
-          author = author.takeIf { it.isNotBlank() },
-        )
+        val (title, author) = readMetadataSafe(book, uri)
+        EpubMetadata(title = title, author = author)
       }
     }
 
@@ -111,6 +112,13 @@ class EpubTextExtractor(
         val book = EpubReader().readEpub(stream)
         val tocTitleMap = buildTocTitleMap(book.tableOfContents.tocReferences)
 
+        // Get OPF base directory from container
+        val opfBaseDir = runCatching {
+          val inspector = EpubStructureInspector(context)
+          val file = File(uri.path ?: "")
+          inspector.readContainer(file)?.opfBaseDir ?: ""
+        }.getOrDefault("")
+
         val imageMap = extractImages(book, bookId)
 
         val allChapters = mutableListOf<ChapterContent>()
@@ -120,12 +128,27 @@ class EpubTextExtractor(
           val resource = spineRef.resource ?: continue
           if (!isHtmlResource(resource)) continue
 
-          val rawHtml = runCatching { resource.reader.readText() }.getOrDefault("")
-          if (rawHtml.isBlank()) continue
+          // Stable indexing: increment ONCE per HTML spine item
+          val currentIdx = chapterIndex
+          chapterIndex++
+
+          val rawHtml = readResourceText(resource, resource.href.orEmpty())
+
+          if (rawHtml.isBlank()) {
+            // Generate placeholder for empty chapters to keep list dense
+            allChapters += ChapterContent(
+              index = currentIdx,
+              title = defaultTitle(currentIdx),
+              paragraphs = listOf(""),
+              styledParagraphs = emptyList(),
+              segments = emptyList(),
+            )
+            continue
+          }
 
           // Store raw HTML for later parsing, but only parse chapters in range
-          if (chapterIndex in startChapter until (startChapter + maxChapters)) {
-            val chapter = parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex, resource.href.orEmpty())
+          if (currentIdx in startChapter until (startChapter + maxChapters)) {
+            val chapter = parseChapterContent(rawHtml, imageMap, tocTitleMap, currentIdx, resource.href.orEmpty(), opfBaseDir)
             allChapters += chapter
           } else {
             // Add placeholder for chapters outside range
@@ -135,35 +158,33 @@ class EpubTextExtractor(
               tocTitle = tocTitle,
               heading = headingTitle,
               firstParagraph = "",
-              fallback = defaultTitle(chapterIndex),
+              fallback = defaultTitle(currentIdx),
             )
             allChapters += ChapterContent(
-              index = chapterIndex,
+              index = currentIdx,
               title = bestTitle,
               paragraphs = emptyList(),
               styledParagraphs = emptyList(),
               segments = emptyList(),
             )
           }
-          chapterIndex += 1
         }
 
-        val metadataTitle = sanitizeMetadataText(book.metadata.firstTitle)
-        val metadataAuthor = book.metadata.authors.firstOrNull()?.let { "${it.firstname} ${it.lastname}" }?.trim().orEmpty()
-        val finalTitle = metadataTitle.takeIf { it.isNotBlank() && !looksLikeHashOrId(it) }
-        val finalAuthor = metadataAuthor.takeIf { it.isNotBlank() }
+        val (finalTitle, finalAuthor) = readMetadataSafe(book, uri)
 
         if (allChapters.isEmpty()) {
           ParsedBook(
             bookTitle = finalTitle,
             author = finalAuthor,
             chapters = listOf(ChapterContent(index = 0, title = "Chapter 1", paragraphs = listOf("No readable chapter found."))),
+            totalChapters = 1,
           )
         } else {
           ParsedBook(
             bookTitle = finalTitle,
             author = finalAuthor,
             chapters = allChapters,
+            totalChapters = chapterIndex,
           )
         }
       }
@@ -179,6 +200,13 @@ class EpubTextExtractor(
         checkNotNull(stream) { "Cannot open EPUB file" }
         val book = EpubReader().readEpub(stream)
         val tocTitleMap = buildTocTitleMap(book.tableOfContents.tocReferences)
+
+        // Get OPF base directory from container
+        val opfBaseDir = runCatching {
+          val inspector = EpubStructureInspector(context)
+          val file = File(uri.path ?: "")
+          inspector.readContainer(file)?.opfBaseDir ?: ""
+        }.getOrDefault("")
         val imageMap = extractImages(book, bookId)
 
         val chapters = mutableListOf<ChapterContent>()
@@ -195,23 +223,25 @@ class EpubTextExtractor(
           val resource = spineRef.resource ?: continue
           if (!isHtmlResource(resource)) continue
 
-          val rawHtml = runCatching { resource.reader.readText() }.getOrDefault("")
-          if (rawHtml.isBlank()) { chapterIndex++; continue }
-
-          chapters += parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex, resource.href.orEmpty())
+          val currentIdx = chapterIndex
           chapterIndex++
+
+          val rawHtml = readResourceText(resource, resource.href.orEmpty())
+          if (rawHtml.isBlank()) continue
+
+          chapters += parseChapterContent(rawHtml, imageMap, tocTitleMap, currentIdx, resource.href.orEmpty())
           onProgress(chapterIndex.toFloat() / totalChapters)
         }
 
         onProgress(1f)
-        val metadataTitle = sanitizeMetadataText(book.metadata.firstTitle)
-        val metadataAuthor = book.metadata.authors.firstOrNull()?.let { "${it.firstname} ${it.lastname}" }?.trim().orEmpty()
+        val (finalTitle, finalAuthor) = readMetadataSafe(book)
         ParsedBook(
-          bookTitle = metadataTitle.takeIf { it.isNotBlank() && !looksLikeHashOrId(it) },
-          author = metadataAuthor.takeIf { it.isNotBlank() },
+          bookTitle = finalTitle,
+          author = finalAuthor,
           chapters = chapters.ifEmpty {
             listOf(ChapterContent(index = 0, title = "Chapter 1", paragraphs = listOf("No readable chapter found.")))
           },
+          totalChapters = chapterIndex.coerceAtLeast(1),
         )
       }
     }
@@ -222,6 +252,13 @@ class EpubTextExtractor(
         checkNotNull(stream) { "Cannot open EPUB file" }
         val book = EpubReader().readEpub(stream)
         val tocTitleMap = buildTocTitleMap(book.tableOfContents.tocReferences)
+
+        // Get OPF base directory from container
+        val opfBaseDir = runCatching {
+          val inspector = EpubStructureInspector(context)
+          val file = File(uri.path ?: "")
+          inspector.readContainer(file)?.opfBaseDir ?: ""
+        }.getOrDefault("")
         val imageMap = extractImages(book, bookId)
 
         val results = mutableListOf<ChapterContent>()
@@ -232,7 +269,7 @@ class EpubTextExtractor(
           if (!isHtmlResource(resource)) continue
 
           if (chapterIndex in indices) {
-            val rawHtml = runCatching { resource.reader.readText() }.getOrDefault("")
+            val rawHtml = readResourceText(resource, resource.href.orEmpty())
             if (rawHtml.isNotBlank()) {
               results += parseChapterContent(rawHtml, imageMap, tocTitleMap, chapterIndex, resource.href.orEmpty())
             }
@@ -249,8 +286,12 @@ class EpubTextExtractor(
     tocTitleMap: Map<String, String>,
     chapterIndex: Int,
     resourceHref: String = "",
+    opfBaseDir: String = "",
   ): ChapterContent {
-    val htmlWithMarkers = replaceImgTags(rawHtml, imageMap)
+    val augmentedMap = imageMap.toMutableMap()
+    extractCssImages(rawHtml, augmentedMap)
+
+    val htmlWithMarkers = replaceImgTags(rawHtml, augmentedMap, resourceHref, opfBaseDir)
     val text = sanitizeHtml(htmlWithMarkers)
     val paragraphs = text.split("\n").map { it.trim() }.filter { it.isNotBlank() }
     val styledParagraphs = sanitizeHtmlStyledParagraphs(htmlWithMarkers)
@@ -325,25 +366,60 @@ class EpubTextExtractor(
     return map
   }
 
-  private fun replaceImgTags(raw: String, imageMap: Map<String, String>): String {
+  private fun resolveEpubHref(
+    opfBaseDir: String,
+    currentResourceHref: String,
+    relativeHref: String,
+  ): String {
+    // 1. External URLs pass through unchanged
+    if (relativeHref.startsWith("http://") || relativeHref.startsWith("https://")) {
+      return relativeHref
+    }
+    // 2. Remove fragment
+    val noFragment = relativeHref.substringBefore('#')
+    // 3. URL decode
+    val decoded = runCatching { URLDecoder.decode(noFragment, "UTF-8") }.getOrDefault(noFragment)
+    // 4. If absolute EPUB path, strip leading /
+    if (decoded.startsWith("/")) return decoded.trimStart('/').lowercase(Locale.US)
+    // 5. If relative, resolve against current resource's directory
+    val currentDir = currentResourceHref.substringBeforeLast('/').let { if (it == currentResourceHref) "" else it }
+    val base = if (currentDir.isNotBlank()) "$currentDir/" else ""
+    val combined = "$base$decoded"
+    // 6. Normalize . and ..
+    val parts = combined.split('/').toMutableList()
+    val normalized = mutableListOf<String>()
+    for (part in parts) {
+      when (part) {
+        "." -> {} // skip
+        ".." -> if (normalized.isNotEmpty()) normalized.removeAt(normalized.lastIndex)
+        else -> normalized.add(part)
+      }
+    }
+    return normalized.joinToString("/").lowercase(Locale.US)
+  }
+
+  private fun replaceImgTags(raw: String, imageMap: Map<String, String>, resourceHref: String = "", opfBaseDir: String = ""): String {
     if (imageMap.isEmpty()) return raw
     val imgRegex = Regex("<img[^>]*src=[\"']([^\"']+)[\"'][^>]*>", RegexOption.IGNORE_CASE)
     return imgRegex.replace(raw) { match ->
       val src = match.groupValues[1]
-      val normalized = normalizeHref(src)
+      // Resolve path using OPF base + current resource
+      val resolved = if (opfBaseDir.isNotBlank() || resourceHref.isNotBlank()) {
+        resolveEpubHref(opfBaseDir, resourceHref, src)
+      } else {
+        normalizeHref(src)
+      }
       val simpleName = src.substringAfterLast('/')
-      // Try many path variants
+      val simpleResolved = resolved.substringAfterLast('/')
       val localPath = imageMap[src]
-        ?: imageMap[normalized]
+        ?: imageMap[resolved]
+        ?: imageMap[normalizeHref(src)]
         ?: imageMap[simpleName]
+        ?: imageMap[simpleResolved]
         ?: imageMap["../Images/$simpleName"]
         ?: imageMap["images/$simpleName"]
-        ?: imageMap["Images/$simpleName"]
-        ?: imageMap["image/$simpleName"]
-        ?: imageMap["Image/$simpleName"]
-        ?: imageMap["OEBPS/$simpleName"]
-        ?: imageMap["OPS/$simpleName"]
         ?: imageMap.entries.firstOrNull { it.key.endsWith(simpleName) }?.value
+        ?: imageMap.entries.firstOrNull { it.key.endsWith(simpleResolved) }?.value
       if (localPath != null) {
         val altMatch = Regex("alt=[\"']([^\"']*)[\"']", RegexOption.IGNORE_CASE).find(match.value)
         val alt = altMatch?.groupValues?.getOrNull(1)?.replace("|", "") ?: ""
@@ -400,10 +476,21 @@ class EpubTextExtractor(
     val map = linkedMapOf<String, String>()
     fun visit(list: List<TOCReference>) {
       list.forEach { ref ->
-        val href = ref.resource?.href
+        val rawHref = ref.resource?.href
         val title = sanitizeMetadataText(ref.title)
-        if (!href.isNullOrBlank() && title.isNotBlank()) {
-          map[normalizeHref(href)] = title
+        if (!rawHref.isNullOrBlank() && title.isNotBlank()) {
+          // Store both full href (with fragment) and base href (without fragment)
+          map[normalizeHref(rawHref)] = title
+          // Also store with fragment for exact anchor matching
+          val base = normalizeHref(rawHref.substringBefore('#'))
+          val fragment = rawHref.substringAfter('#', "").trim()
+          if (base.isNotBlank()) {
+            map[base] = title
+            // Store fragment-level mapping
+            if (fragment.isNotBlank()) {
+              map["$base#$fragment"] = title
+            }
+          }
         }
         if (ref.children.isNotEmpty()) visit(ref.children)
       }
@@ -429,6 +516,36 @@ class EpubTextExtractor(
 
   private fun sanitizeMetadataText(raw: String?): String =
     raw.orEmpty().replace(' ', ' ').replace(Regex("\\s+"), " ").trim()
+
+  /**
+   * Read metadata with encoding fallback using raw OPF bytes.
+   * P1: epub4j may not decode OPF metadata correctly for non-UTF-8 EPUBs.
+   */
+  private fun readMetadataSafe(book: io.documentnode.epub4j.domain.Book, sourceUri: Uri? = null): Pair<String?, String?> {
+    val epubTitle = sanitizeMetadataText(book.metadata.firstTitle)
+    val epubAuthor = book.metadata.authors.firstOrNull()?.let { "${it.firstname} ${it.lastname}" }?.trim().orEmpty()
+
+    if (epubTitle.isNotBlank() && !looksLikeHashOrId(epubTitle)) {
+      return epubTitle.takeIf { it.isNotBlank() } to epubAuthor.takeIf { it.isNotBlank() }
+    }
+
+    // Fallback: read OPF bytes from ZipFile via container.xml OPF path
+    if (sourceUri != null) {
+      return runCatching {
+        val file = File(sourceUri.path ?: return@runCatching epubTitle to epubAuthor)
+        val inspector = EpubStructureInspector(context)
+        val opfInfo = inspector.readOpfInfo(file)
+        if (opfInfo != null) {
+          val opfTitle = sanitizeMetadataText(opfInfo.title)
+          val opfAuthor = sanitizeMetadataText(opfInfo.creator)
+          opfTitle.takeIf { it.isNotBlank() && !looksLikeHashOrId(it) } to
+            opfAuthor.takeIf { it.isNotBlank() }
+        } else epubTitle to epubAuthor
+      }.getOrDefault(epubTitle to epubAuthor)
+    }
+
+    return epubTitle to epubAuthor
+  }
 
   private fun sanitizeHtml(raw: String): String {
     val preprocessed = preprocessHtml(raw)
@@ -488,7 +605,21 @@ class EpubTextExtractor(
         is StrikethroughSpan -> builder.addStyle(SpanStyle(textDecoration = TextDecoration.LineThrough), spanStart, spanEnd)
         is SuperscriptSpan -> builder.addStyle(SpanStyle(baselineShift = BaselineShift.Superscript), spanStart, spanEnd)
         is SubscriptSpan -> builder.addStyle(SpanStyle(baselineShift = BaselineShift.Subscript), spanStart, spanEnd)
-        is ForegroundColorSpan -> builder.addStyle(SpanStyle(color = androidx.compose.ui.graphics.Color(span.foregroundColor)), spanStart, spanEnd)
+        is ForegroundColorSpan -> {
+          val rawColor = span.foregroundColor
+          // Remap very dark colors (night mode readability)
+          val color = if (android.graphics.Color.red(rawColor) < 30 &&
+            android.graphics.Color.green(rawColor) < 30 &&
+            android.graphics.Color.blue(rawColor) < 30) {
+            // Near-black text — use default content color (caller will style)
+            androidx.compose.ui.graphics.Color.Unspecified
+          } else {
+            androidx.compose.ui.graphics.Color(rawColor)
+          }
+          if (color != androidx.compose.ui.graphics.Color.Unspecified) {
+            builder.addStyle(SpanStyle(color = color), spanStart, spanEnd)
+          }
+        }
         is AbsoluteSizeSpan -> {
           // Convert px to dp for device-independent heading detection
           val density = context.resources.displayMetrics.density
@@ -535,10 +666,91 @@ class EpubTextExtractor(
     } else result
   }
 
+  private fun readResourceText(resource: Resource, href: String): String {
+    return runCatching {
+      // Try reading raw bytes first for encoding detection
+      val data = resource.data
+      if (data != null && data.isNotEmpty()) {
+        decodeBytes(data, href)
+      } else {
+        // Fall back to reader
+        resource.reader.readText()
+      }
+    }.getOrElse { e ->
+      Log.w("EpubTextExtractor", "Failed to read $href: ${e.message}", e)
+      ""
+    }
+  }
+
+  private fun decodeStrict(data: ByteArray, charset: Charset): String? {
+    return runCatching {
+      charset.newDecoder()
+        .onMalformedInput(CodingErrorAction.REPORT)
+        .onUnmappableCharacter(CodingErrorAction.REPORT)
+        .decode(ByteBuffer.wrap(data))
+        .toString()
+    }.getOrNull()
+  }
+
+  private fun decodeBytes(data: ByteArray, href: String): String {
+    // 1. Check BOM
+    if (data.size >= 3 && data[0] == 0xEF.toByte() && data[1] == 0xBB.toByte() && data[2] == 0xBF.toByte()) {
+      return String(data, 3, data.size - 3, Charsets.UTF_8)
+    }
+    if (data.size >= 2 && data[0] == 0xFE.toByte() && data[1] == 0xFF.toByte()) {
+      return String(data, 2, data.size - 2, Charsets.UTF_16BE)
+    }
+    if (data.size >= 2 && data[0] == 0xFF.toByte() && data[1] == 0xFE.toByte()) {
+      return String(data, 2, data.size - 2, Charsets.UTF_16LE)
+    }
+
+    // 2. Try to find encoding from XML declaration in first 512 bytes
+    val head = String(data, 0, data.size.coerceAtMost(512), Charsets.ISO_8859_1)
+    val xmlEncPattern = Regex("""encoding\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+    val xmlEnc = xmlEncPattern.find(head)?.groupValues?.getOrNull(1)?.trim()
+
+    // 3. Try to find charset from HTML meta in first 2048 bytes
+    val htmlHead = String(data, 0, data.size.coerceAtMost(2048), Charsets.ISO_8859_1)
+    val metaCharsetPattern = Regex("""<meta[^>]+charset\s*=\s*["']?([^"'\s;>]+)""", RegexOption.IGNORE_CASE)
+    val metaCharset = metaCharsetPattern.find(htmlHead)?.groupValues?.getOrNull(1)?.trim()
+
+    val declaredEncoding = xmlEnc ?: metaCharset
+
+    // 4. Try declared encoding with strict decode
+    if (declaredEncoding != null) {
+      val normalized = declaredEncoding.lowercase(Locale.US).replace("-", "").replace("_", "")
+      val charset = when (normalized) {
+        "utf8" -> Charsets.UTF_8
+        "utf16", "utf16be" -> Charsets.UTF_16BE
+        "utf16le" -> Charsets.UTF_16LE
+        "iso88591", "latin1" -> Charsets.ISO_8859_1
+        "gb2312", "gbk", "gb18030" -> Charset.forName("GB18030")
+        "shift_jis", "sjis", "windows31j" -> runCatching { Charset.forName("Shift_JIS") }.getOrElse { Charsets.UTF_8 }
+        else -> runCatching { Charset.forName(declaredEncoding) }.getOrElse { Charsets.UTF_8 }
+      }
+      decodeStrict(data, charset)?.let { return it }
+    }
+
+    // 5. Try UTF-8 strict
+    decodeStrict(data, Charsets.UTF_8)?.let { return it }
+
+    // 6. Try GB18030 fallback
+    runCatching { Charset.forName("GB18030") }.getOrNull()?.let { gb ->
+      decodeStrict(data, gb)?.let { return it }
+    }
+
+    // 7. Last resort: ISO-8859-1 (never fails but may produce garbled text)
+    Log.w("EpubTextExtractor", "Encoding fallback for $href: using ISO-8859-1")
+    return String(data, Charsets.ISO_8859_1)
+  }
+
   private fun isHtmlResource(resource: Resource): Boolean {
-    val href = resource.href ?: return false
-    val lower = href.lowercase(Locale.US)
-    return lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")
+    val mediaType = resource.mediaType?.name?.lowercase(Locale.US) ?: ""
+    // Primary: media-type check
+    if (mediaType == "application/xhtml+xml" || mediaType == "text/html") return true
+    // Fallback: href suffix
+    val href = resource.href?.lowercase(Locale.US) ?: return false
+    return href.endsWith(".xhtml") || href.endsWith(".html") || href.endsWith(".htm")
   }
 
   private fun normalizeHref(rawHref: String): String {
@@ -570,17 +782,24 @@ class EpubTextExtractor(
   }
 
   private fun extractCssImages(raw: String, imageMap: MutableMap<String, String>) {
-    // Scan inline <style> blocks for background-image URLs
     val cssUrlRegex = Regex("""background-image\s*:\s*url\s*\(\s*["']?([^)"'\s]+)["']?\s*\)""", RegexOption.IGNORE_CASE)
     val styleBlocks = Regex("<style[^>]*>[\\s\\S]*?</style>", RegexOption.IGNORE_CASE).findAll(raw)
-    val bookId = "css" // We don't have bookId here; images are already extracted by extractImages
     for (block in styleBlocks) {
       cssUrlRegex.findAll(block.value).forEach { match ->
         val url = match.groupValues[1]
-        // Try to find this URL in the image map or nearby paths
-        imageMap.computeIfAbsent(url) { url }
+        val normalized = normalizeHref(url)
         val simpleName = url.substringAfterLast('/')
-        imageMap.computeIfAbsent(simpleName) { simpleName }
+        // Try to resolve against existing imageMap entries
+        val resolved = imageMap[url]
+          ?: imageMap[normalized]
+          ?: imageMap[simpleName]
+          ?: imageMap["../Images/$simpleName"]
+          ?: imageMap["images/$simpleName"]
+          ?: imageMap.entries.firstOrNull { it.key.endsWith(simpleName) }?.value
+        if (resolved != null) {
+          imageMap[url] = resolved
+          imageMap[normalized] = resolved
+        }
       }
     }
   }

@@ -17,14 +17,21 @@ class EpubImportService(
   private val context: Context,
   private val dispatcher: CoroutineDispatcher = Dispatchers.IO,
 ) {
+  private val inspector = EpubStructureInspector(context)
+
   suspend fun importFromUri(inputUri: Uri): ImportResult =
     withContext(dispatcher) {
       val resolver = context.contentResolver
       val fileName = resolveFileName(inputUri)
 
-      // Pre-check file size
-      val fileSize = resolver.openInputStream(inputUri)?.use { it.available().toLong() } ?: 0L
-      if (fileSize > 500 * 1024 * 1024) { // 500MB limit
+      // Pre-check file size via OpenableColumns.SIZE (more reliable than available())
+      val fileSize = runCatching {
+        resolver.query(inputUri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { cursor ->
+          if (cursor.moveToFirst()) cursor.getLong(0) else 0L
+        } ?: 0L
+      }.getOrDefault(0L)
+
+      if (fileSize > 500 * 1024 * 1024) {
         throw IllegalStateException("File too large (${fileSize / 1024 / 1024}MB). Maximum 500MB.")
       }
 
@@ -35,27 +42,31 @@ class EpubImportService(
       if (!booksDir.exists()) booksDir.mkdirs()
       val destFile = File(booksDir, finalName)
 
-      // Validate EPUB magic bytes (ZIP format: PK\x03\x04)
-      var isValidEpub = false
+      // Single-pass: copy + validate with magic bytes inline
+      var hasZipHeader = false
       resolver.openInputStream(inputUri).use { input ->
         checkNotNull(input) { "Cannot open source file" }
         val header = ByteArray(4)
         val read = input.read(header)
         if (read == 4 && header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()) {
-          isValidEpub = true
+          hasZipHeader = true
+        }
+        destFile.outputStream().use { output ->
+          output.write(header, 0, read)
+          input.copyTo(output)
         }
       }
 
-      if (!isValidEpub) {
+      if (!hasZipHeader) {
+        destFile.delete()
         throw IllegalStateException("Not a valid EPUB file (missing ZIP header)")
       }
 
-      // Now actually copy the file
-      resolver.openInputStream(inputUri).use { input ->
-        checkNotNull(input) { "Cannot open source file" }
-        destFile.outputStream().use { output ->
-          input.copyTo(output)
-        }
+      // Validate EPUB structure on the copied file
+      val validation = inspector.validate(destFile)
+      if (!validation.isValid) {
+        destFile.delete()
+        throw IllegalStateException("Invalid EPUB: ${validation.errors.joinToString("; ")}")
       }
 
       ImportResult(

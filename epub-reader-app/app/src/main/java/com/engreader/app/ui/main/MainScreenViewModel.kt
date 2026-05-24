@@ -128,14 +128,13 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
       _uiState.update { it.copy(isLoading = true, transientMessage = null) }
       val initialCount = 5
       runCatching {
-          // Load metadata and first few chapters quickly
           val parsed = textExtractor.parseBook(Uri.parse(book.sourceUri), book.id, 0, initialCount)
+          val totalChapters = parsed.totalChapters
           if (!parsed.bookTitle.isNullOrBlank() || !parsed.author.isNullOrBlank()) {
-            stateStore.updateBookMetadata(book.id, parsed.bookTitle, parsed.author, parsed.chapters.size)
+            stateStore.updateBookMetadata(book.id, parsed.bookTitle, parsed.author, totalChapters)
           } else if (parsed.chapters.isNotEmpty()) {
-            stateStore.updateBookMetadata(book.id, totalChapters = parsed.chapters.size)
+            stateStore.updateBookMetadata(book.id, totalChapters = totalChapters)
           }
-          // Extract cover on background
           launch {
             val coverPath = textExtractor.extractCover(Uri.parse(book.sourceUri), book.id)
             if (coverPath.isNotBlank()) {
@@ -144,28 +143,31 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
           }
           val effectiveBook = book.copy(title = parsed.bookTitle ?: book.title, author = parsed.author ?: book.author)
           val progress = stateStore.getProgress(book.id)
-          val initialIndex = progress?.chapterIndex?.coerceIn(0, (parsed.chapters.size - 1).coerceAtLeast(0)) ?: 0
-          val chapterSize = parsed.chapters.getOrNull(initialIndex)?.paragraphs?.size ?: 0
+          val initialIndex = progress?.chapterIndex?.coerceIn(0, (totalChapters - 1).coerceAtLeast(0)) ?: 0
+          // Build fixed-length placeholder list
+          val chapterSlots = MutableList(totalChapters) { index ->
+            parsed.chapters.firstOrNull { it.index == index }
+              ?: ChapterContent(index = index, title = "Chapter ${index + 1}", paragraphs = emptyList())
+          }
+          val chapterSize = chapterSlots.getOrNull(initialIndex)?.paragraphs?.size ?: 0
           val initialParagraphIndex = progress?.paragraphIndex?.coerceIn(0, (chapterSize - 1).coerceAtLeast(0)) ?: 0
           val readerState = ReaderUiState(
             book = effectiveBook,
-            chapters = parsed.chapters,
+            chapters = chapterSlots,
             currentChapterIndex = initialIndex,
             currentParagraphIndex = initialParagraphIndex,
             bookmarks = stateStore.bookmarksForBook(book.id),
             annotations = stateStore.annotationsForBook(book.id),
           )
-          readerState to parsed.chapters.size
+          readerState to totalChapters
         }
         .onSuccess { (reader, totalChapters) ->
           stateStore.updateLastRead(book.id)
-          // Mark as pre-rendered for existing books
           if (book.preRenderProgress < 1f) {
             stateStore.updateBookPreRender(book.id, 1f)
           }
           _uiState.update { it.copy(isLoading = false, readerState = reader, screen = AppScreen.Reader) }
 
-          // Background-load remaining chapters if needed
           if (totalChapters > initialCount) {
             launch {
               val remaining = textExtractor.parseChapterRange(
