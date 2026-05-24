@@ -656,6 +656,8 @@ private fun ReaderContent(
           }
           Row {
             TextButton(onClick = { showToc = true }) { Text(stringResource(R.string.action_toc)) }
+            TextButton(onClick = { showSearch = true }) { Text(stringResource(R.string.action_search)) }
+            TextButton(onClick = { showBookmarks = true }) { Text(stringResource(R.string.action_bookmark_list)) }
             TextButton(onClick = { showStyleDialog = true }) { Text("⚙ ${stringResource(R.string.action_style)}") }
           }
         }
@@ -863,7 +865,9 @@ private fun renderParagraphWithAnnotations(
   val styleRanges = mutableListOf<Pair<Int, Int>>()
   var rendered = paragraph
 
-  val wordAnnotations = annotations.filter { it.type == AnnotationType.WORD }
+  val wordAnnotations = annotations
+    .filter { it.type == AnnotationType.WORD }
+    .sortedBy { paragraph.indexOf(it.anchorText, ignoreCase = true) }
   var searchStart = 0
   wordAnnotations.forEach { annotation ->
     val index = rendered.indexOf(annotation.anchorText, startIndex = searchStart, ignoreCase = true)

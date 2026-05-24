@@ -44,6 +44,19 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
   private val appContext = application.applicationContext
   private var lastTranslateEpochMs: Long = 0L
 
+  private var cachedTranslationService: FallbackTranslationService? = null
+  private fun getTranslationService(): FallbackTranslationService {
+    val cached = cachedTranslationService
+    if (cached != null) return cached
+    val newService = FallbackTranslationService(secureApiKeyStore.loadSettings())
+    cachedTranslationService = newService
+    return newService
+  }
+
+  fun invalidateTranslationService() {
+    cachedTranslationService = null
+  }
+
   private val _uiState = MutableStateFlow(MainUiState())
   val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
 
@@ -199,24 +212,44 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
       return
     }
 
-    val service = FallbackTranslationService(secureApiKeyStore.loadSettings())
+    // 1.6 fix: Check local cache BEFORE making API call
+    val repeatMode = _uiState.value.settings.repeatAnnotationMode
+    if (repeatMode == RepeatAnnotationMode.TAP_ONLY) {
+      val alreadyExists = stateStore.hasWordAnnotation(reader.book.id, chapterIndex, paragraphIndex, word)
+      if (alreadyExists) {
+        _uiState.update { it.copy(transientMessage = "该词已有翻译") }
+        return
+      }
+    }
+
+    val service = getTranslationService()
     viewModelScope.launch {
       when (val result = service.translateWord(WordTranslationRequest(word = word, contextSnippet = paragraph))) {
         is TranslationResult.Success -> {
           val translation = result.data.shortCn
-          when (_uiState.value.settings.repeatAnnotationMode) {
-            RepeatAnnotationMode.TAP_ONLY -> addWordAnnotationIfMissing(reader.book.id, chapterIndex, paragraphIndex, word, translation)
-            RepeatAnnotationMode.CHAPTER_AUTO -> {
-              reader.chapters.firstOrNull { it.index == chapterIndex }?.paragraphs?.forEachIndexed { idx, text ->
-                if (containsWord(text, word)) addWordAnnotationIfMissing(reader.book.id, chapterIndex, idx, word, translation)
-              }
+          when (repeatMode) {
+            RepeatAnnotationMode.TAP_ONLY -> {
+              addWordAnnotationIfMissing(reader.book.id, chapterIndex, paragraphIndex, word, translation)
             }
-            RepeatAnnotationMode.BOOK_AUTO -> {
-              reader.chapters.forEach { chapter ->
-                chapter.paragraphs.forEachIndexed { idx, text ->
-                  if (containsWord(text, word)) addWordAnnotationIfMissing(reader.book.id, chapter.index, idx, word, translation)
+            RepeatAnnotationMode.CHAPTER_AUTO -> {
+              val batch = mutableListOf<AnnotationRecord>()
+              reader.chapters.firstOrNull { it.index == chapterIndex }?.paragraphs?.forEachIndexed { idx, text ->
+                if (containsWord(text, word) && !stateStore.hasWordAnnotation(reader.book.id, chapterIndex, idx, word)) {
+                  batch += buildAnnotation(reader.book.id, chapterIndex, idx, word, translation)
                 }
               }
+              if (batch.isNotEmpty()) stateStore.addAnnotations(batch)
+            }
+            RepeatAnnotationMode.BOOK_AUTO -> {
+              val batch = mutableListOf<AnnotationRecord>()
+              reader.chapters.forEach { chapter ->
+                chapter.paragraphs.forEachIndexed { idx, text ->
+                  if (containsWord(text, word) && !stateStore.hasWordAnnotation(reader.book.id, chapter.index, idx, word)) {
+                    batch += buildAnnotation(reader.book.id, chapter.index, idx, word, translation)
+                  }
+                }
+              }
+              if (batch.isNotEmpty()) stateStore.addAnnotations(batch)
             }
           }
           refreshReaderAnnotations(reader.book.id)
@@ -238,7 +271,16 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
       return
     }
 
-    val service = FallbackTranslationService(secureApiKeyStore.loadSettings())
+    // 1.6 fix: Check local cache BEFORE API call
+    val alreadyTranslated = reader.annotations.any {
+      it.chapterIndex == chapterIndex && it.paragraphIndex == paragraphIndex && it.type == AnnotationType.SENTENCE
+    }
+    if (alreadyTranslated) {
+      _uiState.update { it.copy(transientMessage = "该句已有翻译") }
+      return
+    }
+
+    val service = getTranslationService()
     viewModelScope.launch {
       when (val result = service.translateSentence(SentenceTranslationRequest(sentence = paragraph, contextSnippet = paragraph))) {
         is TranslationResult.Success -> {
@@ -443,6 +485,7 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
     viewModelScope.launch {
       if (apiKey.isBlank()) return@launch
       secureApiKeyStore.putApiKey(provider, apiKey.trim())
+      invalidateTranslationService()
       _uiState.update { it.copy(transientMessage = appContext.getString(R.string.msg_api_key_saved)) }
     }
   }
@@ -551,6 +594,25 @@ class MainScreenViewModel(application: Application) : AndroidViewModel(applicati
       anchorText = word,
       translation = translation,
       type = AnnotationType.WORD,
+    )
+  }
+
+  private fun buildAnnotation(
+    bookId: String,
+    chapterIndex: Int,
+    paragraphIndex: Int,
+    word: String,
+    translation: String,
+  ): AnnotationRecord {
+    return AnnotationRecord(
+      id = java.util.UUID.randomUUID().toString(),
+      bookId = bookId,
+      chapterIndex = chapterIndex,
+      paragraphIndex = paragraphIndex,
+      anchorText = word,
+      translation = translation,
+      type = AnnotationType.WORD,
+      createdAt = System.currentTimeMillis(),
     )
   }
 

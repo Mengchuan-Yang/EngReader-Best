@@ -166,6 +166,12 @@ class AppStateStore(
       removed
     }
 
+  suspend fun addAnnotations(items: List<AnnotationRecord>) =
+    withContext(dispatcher) {
+      if (items.isEmpty()) return@withContext
+      persist(_state.value.copy(annotations = _state.value.annotations + items))
+    }
+
   suspend fun updateSettings(transform: (ReaderSettings) -> ReaderSettings) =
     withContext(dispatcher) {
       persist(_state.value.copy(settings = transform(_state.value.settings)))

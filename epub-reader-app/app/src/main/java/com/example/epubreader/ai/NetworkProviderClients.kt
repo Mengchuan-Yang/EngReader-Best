@@ -90,7 +90,7 @@ internal class DeepSeekProviderClient : BaseHttpProviderClient(AiProvider.DEEPSE
         "目标单词: $sourceText\n上下文: $contextSnippet"
       }
     return callOpenAiCompatible(
-      url = "https://api.deepseek.com/v1/chat/completions",
+      url = "https://api.deepseek.com/chat/completions",
       apiKey = apiKey,
       model = "deepseek-chat",
       systemPrompt = systemPrompt,
@@ -215,18 +215,22 @@ private fun postJson(
     headers.forEach { (k, v) -> setRequestProperty(k, v) }
   }
 
-  connection.outputStream.use { stream ->
-    stream.write(body.toString().toByteArray())
-    stream.flush()
+  try {
+    connection.outputStream.use { stream ->
+      stream.write(body.toString().toByteArray())
+      stream.flush()
+    }
+
+    val code = connection.responseCode
+    val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+    val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+
+    if (code !in 200..299) {
+      throw IOException("HTTP $code: $text")
+    }
+
+    return JSONObject(text)
+  } finally {
+    connection.disconnect()
   }
-
-  val code = connection.responseCode
-  val stream = if (code in 200..299) connection.inputStream else connection.errorStream
-  val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
-
-  if (code !in 200..299) {
-    throw IOException("HTTP $code: $text")
-  }
-
-  return JSONObject(text)
 }
