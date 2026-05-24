@@ -31,3 +31,5 @@ _tmp_epubsrc/
 reference-engreader/
 .vscode/
 *.py
+.part1
+*.imports
